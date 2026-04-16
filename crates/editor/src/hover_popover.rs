@@ -249,8 +249,8 @@ pub fn hover_at_inlay(
 /// selections changed.
 pub fn hide_hover(editor: &mut Editor, cx: &mut Context<Editor>) -> bool {
     let info_popovers = editor.hover_state.info_popovers.drain(..);
-    let diagnostics_popover = editor.hover_state.diagnostic_popover.take();
-    let did_hide = info_popovers.count() > 0 || diagnostics_popover.is_some();
+    let diagnostic_popover = editor.hover_state.diagnostic_popover.take();
+    let did_hide = info_popovers.count() > 0 || diagnostic_popover.is_some();
 
     editor.hover_state.info_task = None;
     editor.hover_state.triggered_from = None;
@@ -514,6 +514,51 @@ fn show_hover(
                 })
             }
 
+            // Append the LSP document-link tooltip alongside hover blocks at
+            // this position (matches VSCode, which shows the tooltip on plain
+            // hover and stacks it onto whatever the hover provider returns).
+            // The doc link itself was already fetched by the visible-range
+            // resolver; on-demand resolve is only needed when the server
+            // returns the tooltip lazily via `documentLink/resolve`.
+            let doc_link = this
+                .read_with(cx, |editor, cx| {
+                    let buffer_snapshot = buffer.read(cx).snapshot();
+                    let link = editor.document_link_at(
+                        buffer_position.buffer_id,
+                        &buffer_position,
+                        &buffer_snapshot,
+                    )?;
+                    let multi_buffer_range = snapshot
+                        .buffer_snapshot()
+                        .buffer_anchor_range_to_anchor_range(link.range.clone())?;
+                    Some((
+                        link.range.clone(),
+                        multi_buffer_range,
+                        link.tooltip.clone(),
+                        link.data.is_some(),
+                    ))
+                })
+                .ok()
+                .flatten();
+
+            let doc_link_tooltip = if let Some((
+                buffer_link_range,
+                multi_buffer_range,
+                mut tooltip,
+                has_unresolved_data,
+            )) = doc_link
+            {
+                if tooltip.is_none() && has_unresolved_data {
+                    let resolve_task = this.update(cx, |editor, cx| {
+                        editor.resolve_document_link(buffer.clone(), buffer_link_range, cx)
+                    })?;
+                    tooltip = resolve_task.await.and_then(|link| link.tooltip);
+                }
+                tooltip.map(|tooltip| (multi_buffer_range, tooltip))
+            } else {
+                None
+            };
+
             for hover_result in hovers_response {
                 // Create symbol range of anchors for highlighting and filtering of future requests.
                 let range = hover_result
@@ -547,6 +592,32 @@ fn show_hover(
                     .flatten();
                 info_popovers.push(InfoPopover {
                     symbol_range: RangeInEditor::Text(range),
+                    parsed_content,
+                    scroll_handle,
+                    keyboard_grace: Rc::new(RefCell::new(ignore_timeout)),
+                    anchor: Some(anchor),
+                    last_bounds: Rc::new(Cell::new(None)),
+                    _subscription: subscription,
+                });
+            }
+
+            if let Some((multi_buffer_range, tooltip)) = doc_link_tooltip {
+                let blocks = vec![HoverBlock {
+                    text: tooltip.to_string(),
+                    kind: HoverBlockKind::Markdown,
+                }];
+                let parsed_content = parse_blocks(&blocks, language_registry.as_ref(), None, cx);
+                let scroll_handle = ScrollHandle::new();
+                let subscription = this
+                    .update(cx, |_, cx| {
+                        parsed_content.as_ref().map(|parsed_content| {
+                            cx.observe(parsed_content, |_, _, cx| cx.notify())
+                        })
+                    })
+                    .ok()
+                    .flatten();
+                info_popovers.push(InfoPopover {
+                    symbol_range: RangeInEditor::Text(multi_buffer_range),
                     parsed_content,
                     scroll_handle,
                     keyboard_grace: Rc::new(RefCell::new(ignore_timeout)),
@@ -621,7 +692,7 @@ fn same_diagnostic_hover(editor: &Editor, snapshot: &EditorSnapshot, anchor: Anc
         .unwrap_or(false)
 }
 
-fn parse_blocks(
+pub(crate) fn parse_blocks(
     blocks: &[HoverBlock],
     language_registry: Option<&Arc<LanguageRegistry>>,
     language: Option<Arc<Language>>,
@@ -963,7 +1034,7 @@ impl HoverState {
 
     pub fn focused(&self, window: &mut Window, cx: &mut Context<Editor>) -> bool {
         let mut hover_popover_is_focused = false;
-        for info_popover in &self.info_popovers {
+        for info_popover in self.info_popovers.iter() {
             if let Some(markdown_view) = &info_popover.parsed_content
                 && markdown_view.focus_handle(cx).is_focused(window)
             {
