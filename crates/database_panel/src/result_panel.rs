@@ -36,6 +36,8 @@ pub struct ResultPanel {
     focus_handle: FocusHandle,
     active: bool,
     state: ResultState,
+    sort_column: Option<usize>,
+    sort_ascending: bool,
 }
 
 impl ResultPanel {
@@ -44,6 +46,8 @@ impl ResultPanel {
             focus_handle: cx.focus_handle(),
             active: false,
             state: ResultState::Empty,
+            sort_column: None,
+            sort_ascending: true,
         }
     }
 
@@ -56,6 +60,8 @@ impl ResultPanel {
         cx: &mut Context<Self>,
     ) {
         self.state = ResultState::Loading;
+        self.sort_column = None;
+        self.sort_ascending = true;
         cx.notify();
 
         let started = std::time::Instant::now();
@@ -248,6 +254,63 @@ impl ResultPanel {
         cx.write_to_clipboard(ClipboardItem::new_string(sql));
     }
 
+    /// Return rows sorted by the currently selected column, or in original
+    /// order when no sort column is active.
+    fn sorted_rows(&self, rows: &[Vec<CellValue>]) -> Vec<Vec<CellValue>> {
+        let Some(col_idx) = self.sort_column else {
+            return rows.to_vec();
+        };
+        let ascending = self.sort_ascending;
+        let mut sorted = rows.to_vec();
+        sorted.sort_by(|a, b| {
+            let cell_a = a.get(col_idx).map(|c| c.display()).unwrap_or_default();
+            let cell_b = b.get(col_idx).map(|c| c.display()).unwrap_or_default();
+
+            // Try numeric comparison first
+            if let (Ok(na), Ok(nb)) = (cell_a.parse::<f64>(), cell_b.parse::<f64>()) {
+                let cmp = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
+                return if ascending { cmp } else { cmp.reverse() };
+            }
+
+            // Fall back to string comparison
+            let cmp = cell_a.cmp(&cell_b);
+            if ascending { cmp } else { cmp.reverse() }
+        });
+        sorted
+    }
+
+    /// Copy all visible results as tab-separated values to the clipboard.
+    fn copy_results_tsv(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = &self.state else {
+            return;
+        };
+
+        let sorted = self.sorted_rows(rows);
+
+        let mut tsv = String::new();
+        // Header
+        tsv.push_str(
+            &columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+        tsv.push('\n');
+        // Rows
+        for row in &sorted {
+            tsv.push_str(
+                &row.iter()
+                    .map(|c| c.display())
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+            );
+            tsv.push('\n');
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(tsv));
+    }
+
     fn render_empty(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .size_full()
@@ -432,7 +495,7 @@ impl ResultPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let columns_clone = columns.to_vec();
-        let rows_clone = rows.to_vec();
+        let sorted = self.sorted_rows(rows);
         let row_count = rows.len();
 
         // Extract theme colors upfront so the closure captures owned Hsla values
@@ -451,7 +514,7 @@ impl ResultPanel {
             // Data rows (uniform_list handles its own scrolling)
             .child(
                 uniform_list("result-rows", row_count, move |range, _window, _cx| {
-                    rows_clone[range.clone()]
+                    sorted[range.clone()]
                         .iter()
                         .enumerate()
                         .map(|(local_idx, row)| {
@@ -477,7 +540,7 @@ impl ResultPanel {
     fn render_column_headers(
         &self,
         columns: &[ColumnMeta],
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut header = div()
             .flex()
@@ -488,21 +551,35 @@ impl ResultPanel {
             .border_b_1()
             .border_color(cx.theme().colors().border);
 
+        // Extract theme colors upfront so closures capture owned Hsla values
+        let text_disabled = cx.theme().colors().text_disabled;
+        let text_color = cx.theme().colors().text;
+        let hover_bg = cx.theme().colors().element_hover;
+
         // Row number column
         header = header.child(
             div()
                 .w(px(40.))
                 .flex_shrink_0()
                 .text_xs()
-                .text_color(cx.theme().colors().text_disabled)
+                .text_color(text_disabled)
                 .flex()
                 .items_center()
                 .child("#"),
         );
 
-        for col in columns {
+        for (i, col) in columns.iter().enumerate() {
+            let col_idx = i;
+            let is_sorted = self.sort_column == Some(i);
+            let sort_indicator = if is_sorted {
+                if self.sort_ascending { " ^" } else { " v" }
+            } else {
+                ""
+            };
+
             header = header.child(
                 div()
+                    .id(SharedString::from(format!("col-header-{i}")))
                     .min_w(px(100.))
                     .max_w(px(200.))
                     .flex_1()
@@ -510,14 +587,25 @@ impl ResultPanel {
                     .flex()
                     .items_center()
                     .overflow_hidden()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if this.sort_column == Some(col_idx) {
+                            this.sort_ascending = !this.sort_ascending;
+                        } else {
+                            this.sort_column = Some(col_idx);
+                            this.sort_ascending = true;
+                        }
+                        cx.notify();
+                    }))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().colors().text)
+                            .text_color(text_color)
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(col.name.clone()),
+                            .child(format!("{}{sort_indicator}", col.name)),
                     ),
             );
         }
@@ -667,6 +755,11 @@ impl Render for ResultPanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "c" && event.keystroke.modifiers.platform {
+                    this.copy_results_tsv(cx);
+                }
+            }))
             .child(content)
     }
 }
