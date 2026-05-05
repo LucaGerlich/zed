@@ -9,9 +9,7 @@ pub use result_panel::ResultPanel;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(
-        |workspace: &mut Workspace,
-         window: Option<&mut Window>,
-         cx: &mut Context<Workspace>| {
+        |workspace: &mut Workspace, window: Option<&mut Window>, cx: &mut Context<Workspace>| {
             connection_panel::register(workspace);
             result_panel::register(workspace);
 
