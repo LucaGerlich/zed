@@ -353,6 +353,40 @@ impl ConnectionPanel {
         self.runtime.clone()
     }
 
+    /// Save a query to the history store.
+    pub fn save_to_history(&self, sql: &str) {
+        let database = self
+            .connected_profile
+            .as_ref()
+            .map(|p| p.database.as_str())
+            .unwrap_or("");
+        let record = pgblade_core::query::QueryRecord {
+            id: pgblade_core::query::QueryId::new(),
+            sql: sql.to_string(),
+            classification: pgblade_core::classifier::classify_sql(sql),
+            executed_at: chrono::Utc::now(),
+            duration_ms: None,
+            row_count: None,
+            error: None,
+            database: database.to_string(),
+        };
+        let _ = self.storage.save_query(&record);
+    }
+
+    /// Load recent query history records.
+    pub fn load_history(&self) -> Vec<pgblade_core::query::QueryRecord> {
+        self.storage.load_recent_history(100).unwrap_or_default()
+    }
+
+    /// Disconnect from the current database session and reset state.
+    pub fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.session = None;
+        self.connected_profile = None;
+        self.schema_tree = None;
+        self.expanded_nodes.clear();
+        cx.notify();
+    }
+
     fn delete_connection(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(conn) = self.saved_connections.get(index) {
             let id = conn.id;
@@ -955,32 +989,98 @@ impl ConnectionPanel {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let header = div()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
             .px_2()
-            .py_1()
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().colors().text_muted)
-                    .child("DATABASE NAVIGATOR"),
-            )
-            .child(
-                div()
-                    .id("add-connection-btn")
-                    .cursor_pointer()
-                    .text_sm()
-                    .text_color(cx.theme().colors().text_muted)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_form(window, cx);
-                    }))
-                    .child("+"),
-            )
+            .py_1();
+
+        if let Some(profile) = &self.connected_profile {
+            // Connected: show database name + disconnect/refresh buttons
+            let profile_name = profile.name.clone();
+            header
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(gpui::green()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(cx.theme().colors().text)
+                                .child(profile_name),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id("refresh-btn")
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(cx.theme().colors().text_muted)
+                                .hover(|s| s.text_color(cx.theme().colors().text))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.fetch_schema(cx);
+                                }))
+                                .child("Refresh"),
+                        )
+                        .child(
+                            div()
+                                .id("disconnect-btn")
+                                .cursor_pointer()
+                                .text_xs()
+                                .text_color(cx.theme().colors().text_muted)
+                                .hover(|s| s.text_color(gpui::red()))
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.disconnect(cx);
+                                }))
+                                .child("Disconnect"),
+                        )
+                        .child(
+                            div()
+                                .id("add-connection-btn")
+                                .cursor_pointer()
+                                .text_sm()
+                                .text_color(cx.theme().colors().text_muted)
+                                .hover(|s| s.text_color(cx.theme().colors().text))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_form(window, cx);
+                                }))
+                                .child("+"),
+                        ),
+                )
+        } else {
+            // Not connected: show title + add button
+            header
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().colors().text_muted)
+                        .child("DATABASE NAVIGATOR"),
+                )
+                .child(
+                    div()
+                        .id("add-connection-btn")
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(cx.theme().colors().text_muted)
+                        .hover(|s| s.text_color(cx.theme().colors().text))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_form(window, cx);
+                        }))
+                        .child("+"),
+                )
+        }
     }
 
     fn render_connection_list(&self, cx: &mut Context<Self>) -> impl IntoElement {

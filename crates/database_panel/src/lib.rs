@@ -12,7 +12,14 @@ pub use result_panel::ResultPanel;
 
 actions!(
     database_panel,
-    [ExecuteQuery, ViewSessions, ExplainAnalyze, FormatSql]
+    [
+        ExecuteQuery,
+        ViewSessions,
+        ExplainAnalyze,
+        FormatSql,
+        ViewHistory,
+        Disconnect
+    ]
 );
 
 pub fn init(cx: &mut App) {
@@ -39,6 +46,18 @@ pub fn init(cx: &mut App) {
             // Register the FormatSql action on the workspace
             workspace.register_action(|workspace, _: &FormatSql, window, cx| {
                 format_sql_action(workspace, window, cx);
+            });
+
+            // Register the ViewHistory action on the workspace
+            workspace.register_action(|workspace, _: &ViewHistory, window, cx| {
+                view_history_action(workspace, window, cx);
+            });
+
+            // Register the Disconnect action on the workspace
+            workspace.register_action(|workspace, _: &Disconnect, _window, cx| {
+                if let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) {
+                    conn_panel.update(cx, |panel, cx| panel.disconnect(cx));
+                }
             });
 
             if let Some(window) = window {
@@ -107,6 +126,11 @@ fn execute_query_action(
         return;
     };
     let runtime = conn_panel.read(cx).runtime();
+
+    // Save to query history
+    conn_panel.update(cx, |panel, _cx| {
+        panel.save_to_history(&sql);
+    });
 
     // Open and update the result panel
     workspace.open_panel::<ResultPanel>(window, cx);
@@ -201,6 +225,70 @@ fn format_sql_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
         editor.select_all(&SelectAll, window, cx);
         editor.insert(&formatted, window, cx);
     });
+}
+
+/// Show recent query history in the result panel.
+fn view_history_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let history = conn_panel.read(cx).load_history();
+
+    let columns = vec![
+        pgblade_core::result::ColumnMeta {
+            name: "Time".to_string(),
+            type_name: "timestamp".to_string(),
+            nullable: false,
+        },
+        pgblade_core::result::ColumnMeta {
+            name: "SQL".to_string(),
+            type_name: "text".to_string(),
+            nullable: false,
+        },
+        pgblade_core::result::ColumnMeta {
+            name: "Type".to_string(),
+            type_name: "text".to_string(),
+            nullable: false,
+        },
+        pgblade_core::result::ColumnMeta {
+            name: "Duration".to_string(),
+            type_name: "text".to_string(),
+            nullable: true,
+        },
+        pgblade_core::result::ColumnMeta {
+            name: "Database".to_string(),
+            type_name: "text".to_string(),
+            nullable: false,
+        },
+    ];
+
+    let rows: Vec<Vec<pgblade_core::result::CellValue>> = history
+        .iter()
+        .map(|r| {
+            vec![
+                pgblade_core::result::CellValue::Text(
+                    r.executed_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                ),
+                pgblade_core::result::CellValue::Text(r.sql.chars().take(200).collect()),
+                pgblade_core::result::CellValue::Text(r.classification.label().to_string()),
+                r.duration_ms
+                    .map(|d| pgblade_core::result::CellValue::Text(format!("{d}ms")))
+                    .unwrap_or(pgblade_core::result::CellValue::Null),
+                pgblade_core::result::CellValue::Text(r.database.clone()),
+            ]
+        })
+        .collect();
+
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| {
+            panel.show_results(columns, rows, cx);
+        });
+    }
 }
 
 /// Execute a system query (not from user editor) and display results in the ResultPanel.

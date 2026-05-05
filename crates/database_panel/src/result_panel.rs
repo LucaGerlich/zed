@@ -96,6 +96,23 @@ impl ResultPanel {
         .detach();
     }
 
+    /// Display pre-built result data directly without executing a query.
+    pub fn show_results(
+        &mut self,
+        columns: Vec<ColumnMeta>,
+        rows: Vec<Vec<CellValue>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.state = ResultState::Success {
+            columns,
+            rows,
+            duration_ms: 0,
+        };
+        self.sort_column = None;
+        self.sort_ascending = true;
+        cx.notify();
+    }
+
     /// Display DDL text in the result panel.
     pub fn show_ddl(&mut self, ddl: String, cx: &mut Context<Self>) {
         self.state = ResultState::Ddl(ddl);
