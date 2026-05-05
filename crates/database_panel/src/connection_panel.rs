@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use editor::Editor;
@@ -10,6 +11,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use pgblade_core::connection::{ConnectionProfile, Environment};
 use pgblade_core::driver::{DatabaseDriver, DatabaseSession};
+use pgblade_core::schema::{SchemaTree, TableEntry, TableKind};
 use pgblade_core::security::CredentialStore;
 use pgblade_core::storage::StorageManager;
 use pgblade_postgres::PostgresDriver;
@@ -43,6 +45,9 @@ pub struct ConnectionPanel {
     driver: PostgresDriver,
     session: Option<Arc<dyn DatabaseSession>>,
     connected_profile: Option<ConnectionProfile>,
+    // Schema tree state
+    schema_tree: Option<SchemaTree>,
+    expanded_nodes: HashSet<String>,
 }
 
 impl ConnectionPanel {
@@ -113,6 +118,8 @@ impl ConnectionPanel {
             driver,
             session: None,
             connected_profile: None,
+            schema_tree: None,
+            expanded_nodes: HashSet::new(),
         }
     }
 
@@ -201,6 +208,7 @@ impl ConnectionPanel {
                         tracing::info!("database connection established");
                         cx.emit(PanelEvent::Activate);
                         cx.notify();
+                        panel.fetch_schema(cx);
                     })
                     .ok();
                 }
@@ -209,6 +217,104 @@ impl ConnectionPanel {
                 }
                 Err(e) => {
                     tracing::error!("runtime error: {e}");
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn fetch_schema(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move {
+                    let schemas = session.list_schemas().await?;
+                    let mut entries = Vec::new();
+
+                    for schema in &schemas {
+                        let tables_raw = session.list_tables(&schema.name).await?;
+                        let mut tables = Vec::new();
+                        let mut views = Vec::new();
+                        let mut mat_views = Vec::new();
+
+                        for table in &tables_raw {
+                            let columns = session.list_columns(&schema.name, &table.name).await?;
+                            let constraints =
+                                session.list_constraints(&schema.name, &table.name).await?;
+                            let foreign_keys =
+                                session.list_foreign_keys(&schema.name, &table.name).await?;
+                            let indexes = session.list_indexes(&schema.name, &table.name).await?;
+                            let triggers = session.list_triggers(&schema.name, &table.name).await?;
+
+                            let entry = TableEntry {
+                                info: table.clone(),
+                                columns,
+                                constraints,
+                                foreign_keys,
+                                indexes,
+                                triggers,
+                            };
+
+                            match table.kind {
+                                TableKind::View => views.push(entry),
+                                TableKind::MaterializedView => mat_views.push(entry),
+                                TableKind::Table => tables.push(entry),
+                            }
+                        }
+
+                        let functions = session.list_functions(&schema.name).await?;
+                        let sequences = session.list_sequences(&schema.name).await?;
+
+                        entries.push(pgblade_core::schema::SchemaEntry {
+                            info: schema.clone(),
+                            tables,
+                            views,
+                            materialized_views: mat_views,
+                            functions,
+                            sequences,
+                        });
+                    }
+
+                    Ok::<_, pgblade_core::error::QueryError>(SchemaTree { schemas: entries })
+                })
+                .await;
+
+            match result {
+                Ok(Ok(tree)) => {
+                    this.update(cx, |panel, cx| {
+                        // Auto-expand default nodes
+                        if let Some(profile) = &panel.connected_profile {
+                            panel
+                                .expanded_nodes
+                                .insert(format!("conn:{}", profile.name));
+                            panel
+                                .expanded_nodes
+                                .insert(format!("db:{}", profile.database));
+                            for schema in &tree.schemas {
+                                if schema.info.is_default {
+                                    panel
+                                        .expanded_nodes
+                                        .insert(format!("schema:{}", schema.info.name));
+                                    panel
+                                        .expanded_nodes
+                                        .insert(format!("tables:{}", schema.info.name));
+                                }
+                            }
+                        }
+                        panel.schema_tree = Some(tree);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("schema introspection failed: {e}");
+                }
+                Err(e) => {
+                    tracing::error!("runtime error during schema fetch: {e}");
                 }
             }
         })
@@ -234,6 +340,321 @@ impl ConnectionPanel {
             self.saved_connections = self.storage.load_connections().unwrap_or_default();
             cx.notify();
         }
+    }
+
+    fn is_expanded(&self, node_id: &str) -> bool {
+        self.expanded_nodes.contains(node_id)
+    }
+
+    fn render_tree_row(
+        &self,
+        node_id: &str,
+        label: &str,
+        depth: usize,
+        has_children: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let indent = depth as f32 * 12.0;
+        let is_expanded = self.expanded_nodes.contains(node_id);
+        let chevron = if has_children {
+            if is_expanded { "v " } else { "> " }
+        } else {
+            "  "
+        };
+
+        let id = SharedString::from(format!("tree-{node_id}"));
+        let node_id_owned = node_id.to_string();
+
+        div()
+            .id(id)
+            .h(px(22.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .pl(px(indent + 4.0))
+            .pr_1()
+            .text_xs()
+            .text_color(cx.theme().colors().text)
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                if has_children {
+                    if this.expanded_nodes.contains(&node_id_owned) {
+                        this.expanded_nodes.remove(&node_id_owned);
+                    } else {
+                        this.expanded_nodes.insert(node_id_owned.clone());
+                    }
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child(chevron.to_string()),
+            )
+            .child(label.to_string())
+            .into_any_element()
+    }
+
+    fn render_table_entry(
+        &self,
+        table: &TableEntry,
+        schema_name: &str,
+        depth: usize,
+        rows: &mut Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) {
+        let qualified = format!("{}.{}", schema_name, table.info.name);
+        let table_id = format!("table:{qualified}");
+        rows.push(self.render_tree_row(&table_id, &table.info.name, depth, true, cx));
+
+        if self.is_expanded(&table_id) {
+            // Columns
+            let cols_id = format!("cols:{qualified}");
+            rows.push(self.render_tree_row(
+                &cols_id,
+                &format!("Columns ({})", table.columns.len()),
+                depth + 1,
+                !table.columns.is_empty(),
+                cx,
+            ));
+            if self.is_expanded(&cols_id) {
+                for col in &table.columns {
+                    let pk = if col.is_primary_key { "PK " } else { "" };
+                    let null = if col.nullable { "?" } else { "" };
+                    let label = format!("{pk}{} ({}){null}", col.name, col.data_type);
+                    rows.push(self.render_tree_row(
+                        &format!("col:{qualified}.{}", col.name),
+                        &label,
+                        depth + 2,
+                        false,
+                        cx,
+                    ));
+                }
+            }
+
+            // Constraints
+            let con_id = format!("constraints:{qualified}");
+            rows.push(self.render_tree_row(
+                &con_id,
+                &format!("Constraints ({})", table.constraints.len()),
+                depth + 1,
+                !table.constraints.is_empty(),
+                cx,
+            ));
+            if self.is_expanded(&con_id) {
+                for c in &table.constraints {
+                    rows.push(self.render_tree_row(
+                        &format!("con:{qualified}.{}", c.name),
+                        &format!("{} ({})", c.name, c.kind.label()),
+                        depth + 2,
+                        false,
+                        cx,
+                    ));
+                }
+            }
+
+            // Foreign Keys
+            let fk_id = format!("fks:{qualified}");
+            rows.push(self.render_tree_row(
+                &fk_id,
+                &format!("Foreign Keys ({})", table.foreign_keys.len()),
+                depth + 1,
+                !table.foreign_keys.is_empty(),
+                cx,
+            ));
+            if self.is_expanded(&fk_id) {
+                for fk in &table.foreign_keys {
+                    rows.push(self.render_tree_row(
+                        &format!("fk:{qualified}.{}", fk.name),
+                        &format!("{} -> {}", fk.name, fk.referenced_table),
+                        depth + 2,
+                        false,
+                        cx,
+                    ));
+                }
+            }
+
+            // Indexes
+            let idx_id = format!("indexes:{qualified}");
+            rows.push(self.render_tree_row(
+                &idx_id,
+                &format!("Indexes ({})", table.indexes.len()),
+                depth + 1,
+                !table.indexes.is_empty(),
+                cx,
+            ));
+            if self.is_expanded(&idx_id) {
+                for idx in &table.indexes {
+                    let unique = if idx.is_unique { ", unique" } else { "" };
+                    rows.push(self.render_tree_row(
+                        &format!("idx:{qualified}.{}", idx.name),
+                        &format!("{} ({}{})", idx.name, idx.index_type, unique),
+                        depth + 2,
+                        false,
+                        cx,
+                    ));
+                }
+            }
+
+            // Triggers
+            let trig_id = format!("triggers:{qualified}");
+            rows.push(self.render_tree_row(
+                &trig_id,
+                &format!("Triggers ({})", table.triggers.len()),
+                depth + 1,
+                !table.triggers.is_empty(),
+                cx,
+            ));
+            if self.is_expanded(&trig_id) {
+                for t in &table.triggers {
+                    rows.push(self.render_tree_row(
+                        &format!("trig:{qualified}.{}", t.name),
+                        &format!("{} ({} {})", t.name, t.timing, t.event),
+                        depth + 2,
+                        false,
+                        cx,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn render_schema_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(tree) = &self.schema_tree else {
+            return div().child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .child("Loading schema..."),
+            );
+        };
+        let Some(profile) = &self.connected_profile else {
+            return div();
+        };
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+
+        // Connection root
+        let conn_id = format!("conn:{}", profile.name);
+        rows.push(self.render_tree_row(
+            &conn_id,
+            &format!("{} (connected)", profile.name),
+            0,
+            true,
+            cx,
+        ));
+
+        if self.is_expanded(&conn_id) {
+            // Database level
+            let db_id = format!("db:{}", profile.database);
+            rows.push(self.render_tree_row(&db_id, &profile.database, 1, true, cx));
+
+            if self.is_expanded(&db_id) {
+                for schema in &tree.schemas {
+                    let schema_id = format!("schema:{}", schema.info.name);
+                    rows.push(self.render_tree_row(&schema_id, &schema.info.name, 2, true, cx));
+
+                    if self.is_expanded(&schema_id) {
+                        // Tables category
+                        let tables_id = format!("tables:{}", schema.info.name);
+                        rows.push(self.render_tree_row(
+                            &tables_id,
+                            &format!("Tables ({})", schema.tables.len()),
+                            3,
+                            !schema.tables.is_empty(),
+                            cx,
+                        ));
+
+                        if self.is_expanded(&tables_id) {
+                            for table in &schema.tables {
+                                self.render_table_entry(table, &schema.info.name, 4, &mut rows, cx);
+                            }
+                        }
+
+                        // Views
+                        let views_id = format!("views:{}", schema.info.name);
+                        rows.push(self.render_tree_row(
+                            &views_id,
+                            &format!("Views ({})", schema.views.len()),
+                            3,
+                            !schema.views.is_empty(),
+                            cx,
+                        ));
+                        if self.is_expanded(&views_id) {
+                            for view in &schema.views {
+                                self.render_table_entry(view, &schema.info.name, 4, &mut rows, cx);
+                            }
+                        }
+
+                        // Materialized Views
+                        let mv_id = format!("matviews:{}", schema.info.name);
+                        rows.push(self.render_tree_row(
+                            &mv_id,
+                            &format!("Materialized Views ({})", schema.materialized_views.len()),
+                            3,
+                            !schema.materialized_views.is_empty(),
+                            cx,
+                        ));
+                        if self.is_expanded(&mv_id) {
+                            for mv in &schema.materialized_views {
+                                self.render_table_entry(mv, &schema.info.name, 4, &mut rows, cx);
+                            }
+                        }
+
+                        // Functions
+                        let fn_id = format!("functions:{}", schema.info.name);
+                        rows.push(self.render_tree_row(
+                            &fn_id,
+                            &format!("Functions ({})", schema.functions.len()),
+                            3,
+                            !schema.functions.is_empty(),
+                            cx,
+                        ));
+                        if self.is_expanded(&fn_id) {
+                            for func in &schema.functions {
+                                let label = format!(
+                                    "{}({}) -> {}",
+                                    func.name, func.arguments, func.return_type
+                                );
+                                rows.push(self.render_tree_row(
+                                    &format!("func:{}.{}", schema.info.name, func.name),
+                                    &label,
+                                    4,
+                                    false,
+                                    cx,
+                                ));
+                            }
+                        }
+
+                        // Sequences
+                        let seq_id = format!("sequences:{}", schema.info.name);
+                        rows.push(self.render_tree_row(
+                            &seq_id,
+                            &format!("Sequences ({})", schema.sequences.len()),
+                            3,
+                            !schema.sequences.is_empty(),
+                            cx,
+                        ));
+                        if self.is_expanded(&seq_id) {
+                            for seq in &schema.sequences {
+                                rows.push(self.render_tree_row(
+                                    &format!("seq:{}.{}", schema.info.name, seq.name),
+                                    &seq.name,
+                                    4,
+                                    false,
+                                    cx,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        div().flex().flex_col().children(rows)
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -473,17 +894,38 @@ impl Render for ConnectionPanel {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(self.render_header(cx))
-            .child(
+            .child(self.render_header(cx));
+
+        if self.show_form {
+            panel = panel.child(self.render_form(cx));
+        } else if self.schema_tree.is_some() {
+            // Connected with schema loaded — show tree
+            panel = panel.child(
+                div()
+                    .id("schema-tree-container")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .py_1()
+                    .child(self.render_schema_tree(cx)),
+            );
+        } else if self.session.is_some() {
+            // Connected but schema still loading
+            panel = panel.child(
+                div()
+                    .p_2()
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child("Loading schema..."),
+            );
+        } else {
+            // Not connected — show connection list
+            panel = panel.child(
                 div()
                     .flex_1()
                     .overflow_hidden()
                     .py_1()
                     .child(self.render_connection_list(cx)),
             );
-
-        if self.show_form {
-            panel = panel.child(self.render_form(cx));
         }
 
         panel
