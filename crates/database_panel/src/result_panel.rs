@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::*;
 use tokio::runtime::Runtime;
-use ui::IconName;
 use ui::prelude::*;
+use ui::{Button, ButtonStyle, IconName, LabelSize};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -27,6 +27,7 @@ enum ResultState {
         rows: Vec<Vec<CellValue>>,
         duration_ms: u128,
     },
+    Ddl(String),
     Error(String),
 }
 
@@ -86,6 +87,74 @@ impl ResultPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// Display DDL text in the result panel.
+    pub fn show_ddl(&mut self, ddl: String, cx: &mut Context<Self>) {
+        self.state = ResultState::Ddl(ddl);
+        cx.notify();
+    }
+
+    /// Export current result set as CSV to clipboard.
+    fn export_csv(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = &self.state else {
+            return;
+        };
+
+        let mut csv = String::new();
+
+        // Header row
+        let header: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        csv.push_str(&header.join(","));
+        csv.push('\n');
+
+        // Data rows
+        for row in rows {
+            let line: Vec<String> = row
+                .iter()
+                .map(|cell| {
+                    let val = cell.display();
+                    if val.contains(',') || val.contains('"') || val.contains('\n') {
+                        format!("\"{}\"", val.replace('"', "\"\""))
+                    } else {
+                        val
+                    }
+                })
+                .collect();
+            csv.push_str(&line.join(","));
+            csv.push('\n');
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(csv));
+    }
+
+    /// Export current result set as JSON to clipboard.
+    fn export_json(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = &self.state else {
+            return;
+        };
+
+        let json_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let mut obj = serde_json::Map::new();
+                for (i, cell) in row.iter().enumerate() {
+                    let key = columns.get(i).map(|c| c.name.as_str()).unwrap_or("?");
+                    let val = match cell {
+                        CellValue::Null => serde_json::Value::Null,
+                        CellValue::Boolean(b) => serde_json::Value::Bool(*b),
+                        CellValue::Integer(n) => serde_json::json!(*n),
+                        CellValue::Float(f) => serde_json::json!(*f),
+                        _ => serde_json::Value::String(cell.display()),
+                    };
+                    obj.insert(key.to_string(), val);
+                }
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&json_rows).unwrap_or_default();
+        cx.write_to_clipboard(ClipboardItem::new_string(json));
     }
 
     fn render_empty(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -159,12 +228,65 @@ impl ResultPanel {
             )
     }
 
+    fn render_ddl(&self, ddl: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let ddl_text = ddl.to_string();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(28.))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().title_bar_background)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().colors().text)
+                            .child("Table DDL"),
+                    )
+                    .child(
+                        Button::new("copy-ddl", "Copy")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                if let ResultState::Ddl(ref ddl) = this.state {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(ddl.clone()));
+                                }
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("ddl-scroll-container")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .p_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(cx.theme().colors().text)
+                            .whitespace_nowrap()
+                            .child(ddl_text),
+                    ),
+            )
+    }
+
     fn render_results(
         &self,
         columns: &[ColumnMeta],
         rows: &[Vec<CellValue>],
         duration_ms: u128,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let columns_clone = columns.to_vec();
         let rows_clone = rows.to_vec();
@@ -324,33 +446,42 @@ impl ResultPanel {
         &self,
         row_count: usize,
         duration_ms: u128,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let row_word = if row_count == 1 { "row" } else { "rows" };
         div()
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
-            .h(px(24.))
+            .h(px(28.))
             .px_2()
             .border_t_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().title_bar_background)
             .child(
                 div()
+                    .flex_1()
                     .text_xs()
                     .text_color(cx.theme().colors().text_muted)
-                    .child(format!(
-                        "{} row{} returned",
-                        row_count,
-                        if row_count == 1 { "" } else { "s" }
-                    )),
+                    .child(format!("{row_count} {row_word} in {duration_ms}ms")),
             )
             .child(
                 div()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child(format!("{}ms", duration_ms)),
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(
+                        Button::new("export-csv", "CSV")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.export_csv(cx))),
+                    )
+                    .child(
+                        Button::new("export-json", "JSON")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.export_json(cx))),
+                    ),
             )
     }
 }
@@ -365,16 +496,19 @@ impl EventEmitter<PanelEvent> for ResultPanel {}
 
 impl Render for ResultPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match &self.state {
+        // Clone state data needed for rendering to avoid borrow issues
+        let state = self.state.clone();
+        let content = match state {
             ResultState::Empty => self.render_empty(cx).into_any_element(),
             ResultState::Loading => self.render_loading(cx).into_any_element(),
-            ResultState::Error(msg) => self.render_error(&msg.clone(), cx).into_any_element(),
+            ResultState::Error(msg) => self.render_error(&msg, cx).into_any_element(),
+            ResultState::Ddl(ddl) => self.render_ddl(&ddl, cx).into_any_element(),
             ResultState::Success {
                 columns,
                 rows,
                 duration_ms,
             } => self
-                .render_results(columns, rows, *duration_ms, cx)
+                .render_results(&columns, &rows, duration_ms, cx)
                 .into_any_element(),
         };
 

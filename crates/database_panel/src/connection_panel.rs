@@ -17,6 +17,8 @@ use pgblade_core::storage::StorageManager;
 use pgblade_postgres::PostgresDriver;
 use pgblade_security::KeychainStore;
 
+use crate::ResultPanel;
+
 actions!(database_panel, [ToggleFocus, AddConnection]);
 
 pub fn register(workspace: &mut Workspace) {
@@ -48,10 +50,16 @@ pub struct ConnectionPanel {
     // Schema tree state
     schema_tree: Option<SchemaTree>,
     expanded_nodes: HashSet<String>,
+    // Workspace reference for cross-panel communication
+    workspace: WeakEntity<Workspace>,
 }
 
 impl ConnectionPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let storage = StorageManager::init().unwrap_or_else(|e| {
             tracing::error!("failed to init storage: {e}");
             StorageManager::in_memory().unwrap()
@@ -120,6 +128,7 @@ impl ConnectionPanel {
             connected_profile: None,
             schema_tree: None,
             expanded_nodes: HashSet::new(),
+            workspace,
         }
     }
 
@@ -346,6 +355,169 @@ impl ConnectionPanel {
         self.expanded_nodes.contains(node_id)
     }
 
+    /// Preview table data by executing SELECT * FROM ... LIMIT 100
+    fn preview_table(
+        &self,
+        schema: &str,
+        table: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+        let sql = format!("SELECT * FROM \"{schema}\".\"{table}\" LIMIT 100");
+
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_panel::<ResultPanel>(window, cx);
+                if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+                    result_panel.update(cx, |panel, cx| {
+                        panel.execute_query(sql, session, runtime, cx);
+                    });
+                }
+            });
+        }
+    }
+
+    /// Show DDL for a table by finding it in the schema tree and generating the statement.
+    fn show_ddl(&self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tree) = &self.schema_tree else {
+            return;
+        };
+
+        // Find the table entry in the schema tree
+        let table_entry = tree
+            .schemas
+            .iter()
+            .find(|s| s.info.name == schema)
+            .and_then(|s| {
+                s.tables
+                    .iter()
+                    .chain(s.views.iter())
+                    .chain(s.materialized_views.iter())
+                    .find(|t| t.info.name == table)
+            });
+
+        let Some(entry) = table_entry else {
+            return;
+        };
+
+        let ddl = Self::generate_ddl(entry);
+
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_panel::<ResultPanel>(window, cx);
+                if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+                    result_panel.update(cx, |panel, cx| {
+                        panel.show_ddl(ddl, cx);
+                    });
+                }
+            });
+        }
+    }
+
+    /// Generate CREATE TABLE DDL from introspected schema information.
+    fn generate_ddl(table: &TableEntry) -> String {
+        let kind_keyword = match table.info.kind {
+            TableKind::View => "VIEW",
+            TableKind::MaterializedView => "MATERIALIZED VIEW",
+            TableKind::Table => "TABLE",
+        };
+
+        if matches!(
+            table.info.kind,
+            TableKind::View | TableKind::MaterializedView
+        ) {
+            // For views we don't have the SELECT definition, show a placeholder
+            return format!(
+                "-- DDL for {} \"{}\".\"{}\" (view definition not available via introspection)\n\
+                 CREATE {} \"{}\".\"{}\" AS\n  SELECT ...;\n",
+                kind_keyword,
+                table.info.schema,
+                table.info.name,
+                kind_keyword,
+                table.info.schema,
+                table.info.name,
+            );
+        }
+
+        let mut ddl = format!(
+            "CREATE TABLE \"{}\".\"{}\" (\n",
+            table.info.schema, table.info.name
+        );
+
+        let col_count = table.columns.len();
+        for (i, col) in table.columns.iter().enumerate() {
+            let not_null = if col.nullable { "" } else { " NOT NULL" };
+            let default = col
+                .default_value
+                .as_ref()
+                .map(|d| format!(" DEFAULT {d}"))
+                .unwrap_or_default();
+            let trailing_comma = if i + 1 < col_count { "," } else { "" };
+            ddl.push_str(&format!(
+                "    \"{}\" {}{}{}{}\n",
+                col.name, col.data_type, not_null, default, trailing_comma
+            ));
+        }
+
+        // Primary key constraint
+        let pk_cols: Vec<&str> = table
+            .columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !pk_cols.is_empty() {
+            let pk_list = pk_cols
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // Add comma after last column if we have a PK
+            if col_count > 0 {
+                // Replace last newline to add comma
+                if ddl.ends_with('\n') {
+                    ddl.pop();
+                    // Find and replace the last non-comma character before newline
+                    if !ddl.ends_with(',') {
+                        ddl.push(',');
+                    }
+                    ddl.push('\n');
+                }
+            }
+            ddl.push_str(&format!(
+                "    CONSTRAINT \"{}_pkey\" PRIMARY KEY ({})\n",
+                table.info.name, pk_list
+            ));
+        }
+
+        ddl.push_str(");\n");
+
+        // Indexes (non-PK)
+        for idx in &table.indexes {
+            let unique = if idx.is_unique { "UNIQUE " } else { "" };
+            let cols = idx
+                .columns
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ddl.push_str(&format!(
+                "\nCREATE {}INDEX \"{}\" ON \"{}\".\"{}\" USING {} ({});",
+                unique, idx.name, table.info.schema, table.info.name, idx.index_type, cols
+            ));
+        }
+
+        if !table.indexes.is_empty() {
+            ddl.push('\n');
+        }
+
+        ddl
+    }
+
     fn render_tree_row(
         &self,
         node_id: &str,
@@ -396,6 +568,72 @@ impl ConnectionPanel {
             .into_any_element()
     }
 
+    /// Render a table row that expands on click AND triggers data preview.
+    /// Also includes a DDL button visible on hover.
+    fn render_table_row(
+        &self,
+        node_id: &str,
+        table_name: &str,
+        schema_name: &str,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let indent = depth as f32 * 12.0;
+        let is_expanded = self.expanded_nodes.contains(node_id);
+        let chevron = if is_expanded { "v " } else { "> " };
+
+        let id = SharedString::from(format!("tree-{node_id}"));
+        let ddl_id = SharedString::from(format!("ddl-{node_id}"));
+        let node_id_owned = node_id.to_string();
+        let schema_owned = schema_name.to_string();
+        let table_owned = table_name.to_string();
+        let schema_for_ddl = schema_name.to_string();
+        let table_for_ddl = table_name.to_string();
+
+        div()
+            .id(id)
+            .h(px(22.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .pl(px(indent + 4.0))
+            .pr_1()
+            .text_xs()
+            .text_color(cx.theme().colors().text)
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // Toggle expand/collapse
+                if this.expanded_nodes.contains(&node_id_owned) {
+                    this.expanded_nodes.remove(&node_id_owned);
+                } else {
+                    this.expanded_nodes.insert(node_id_owned.clone());
+                }
+                cx.notify();
+                // Preview table data
+                this.preview_table(&schema_owned, &table_owned, window, cx);
+            }))
+            .child(
+                div()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child(chevron.to_string()),
+            )
+            .child(div().flex_1().child(table_name.to_string()))
+            .child(
+                div()
+                    .id(ddl_id)
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_ddl(&schema_for_ddl, &table_for_ddl, window, cx);
+                    }))
+                    .child("DDL"),
+            )
+            .into_any_element()
+    }
+
     fn render_table_entry(
         &self,
         table: &TableEntry,
@@ -406,7 +644,7 @@ impl ConnectionPanel {
     ) {
         let qualified = format!("{}.{}", schema_name, table.info.name);
         let table_id = format!("table:{qualified}");
-        rows.push(self.render_tree_row(&table_id, &table.info.name, depth, true, cx));
+        rows.push(self.render_table_row(&table_id, &table.info.name, schema_name, depth, cx));
 
         if self.is_expanded(&table_id) {
             // Columns

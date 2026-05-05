@@ -22,7 +22,8 @@ pub fn init(cx: &mut App) {
             });
 
             if let Some(window) = window {
-                let connection = cx.new(|cx| ConnectionPanel::new(window, cx));
+                let workspace_weak = cx.weak_entity();
+                let connection = cx.new(|cx| ConnectionPanel::new(workspace_weak, window, cx));
                 workspace.add_panel(connection, window, cx);
 
                 let results = cx.new(ResultPanel::new);
