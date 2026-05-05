@@ -1646,6 +1646,7 @@
     "context": "Editor && mode == full",
     "bindings": {
       "cmd-enter": "database_panel::ExecuteQuery",
+      "cmd-alt-x": "database_panel::ExplainAnalyze",
     },
   },
 ]

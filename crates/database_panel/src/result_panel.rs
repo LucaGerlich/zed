@@ -28,6 +28,7 @@ enum ResultState {
         duration_ms: u128,
     },
     Ddl(String),
+    Explain(String),
     Error(String),
 }
 
@@ -93,6 +94,50 @@ impl ResultPanel {
     pub fn show_ddl(&mut self, ddl: String, cx: &mut Context<Self>) {
         self.state = ResultState::Ddl(ddl);
         cx.notify();
+    }
+
+    /// Execute an EXPLAIN ANALYZE query and display the formatted plan.
+    pub fn execute_explain(
+        &mut self,
+        sql: String,
+        session: Arc<dyn DatabaseSession>,
+        runtime: Arc<Runtime>,
+        cx: &mut Context<Self>,
+    ) {
+        self.state = ResultState::Loading;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { session.execute(&sql).await })
+                .await;
+
+            this.update(cx, |panel, cx| {
+                match result {
+                    Ok(Ok(result_set)) => {
+                        // The JSON plan is in the first column of the first row
+                        let plan_text = result_set
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .map(|cell| cell.display())
+                            .unwrap_or_else(|| "No plan available".to_string());
+
+                        let formatted = format_explain_plan(&plan_text);
+                        panel.state = ResultState::Explain(formatted);
+                    }
+                    Ok(Err(e)) => {
+                        panel.state = ResultState::Error(e.to_string());
+                    }
+                    Err(e) => {
+                        panel.state = ResultState::Error(format!("runtime error: {e}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Export current result set as CSV to clipboard.
@@ -277,6 +322,58 @@ impl ResultPanel {
                             .text_color(cx.theme().colors().text)
                             .whitespace_nowrap()
                             .child(ddl_text),
+                    ),
+            )
+    }
+
+    fn render_explain(&self, plan: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let plan_owned = plan.to_string();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().title_bar_background)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().colors().text)
+                            .child("Query Execution Plan"),
+                    )
+                    .child(
+                        Button::new("copy-plan", "Copy")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(move |_this, _, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    plan_owned.clone(),
+                                ));
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("explain-scroll-container")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .p_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_family("monospace")
+                            .text_color(cx.theme().colors().text)
+                            .whitespace_nowrap()
+                            .child(plan.to_string()),
                     ),
             )
     }
@@ -503,6 +600,7 @@ impl Render for ResultPanel {
             ResultState::Loading => self.render_loading(cx).into_any_element(),
             ResultState::Error(msg) => self.render_error(&msg, cx).into_any_element(),
             ResultState::Ddl(ddl) => self.render_ddl(&ddl, cx).into_any_element(),
+            ResultState::Explain(plan) => self.render_explain(&plan, cx).into_any_element(),
             ResultState::Success {
                 columns,
                 rows,
@@ -572,5 +670,139 @@ impl Panel for ResultPanel {
 
     fn set_active(&mut self, active: bool, _window: &mut Window, _cx: &mut Context<Self>) {
         self.active = active;
+    }
+}
+
+/// Parse EXPLAIN (FORMAT JSON) output and produce a human-readable tree.
+fn format_explain_plan(json_text: &str) -> String {
+    let Ok(plan) = serde_json::from_str::<serde_json::Value>(json_text) else {
+        // Not valid JSON — return as-is (plain text EXPLAIN output)
+        return json_text.to_string();
+    };
+
+    let mut output = String::new();
+
+    // PostgreSQL EXPLAIN JSON returns an array with one element
+    let plan_array = if let Some(arr) = plan.as_array() {
+        arr
+    } else {
+        return json_text.to_string();
+    };
+
+    for plan_entry in plan_array {
+        if let Some(plan_node) = plan_entry.get("Plan") {
+            format_plan_node(plan_node, 0, &mut output);
+        }
+
+        // Add summary
+        if let Some(planning_time) = plan_entry.get("Planning Time") {
+            output.push_str(&format!(
+                "\nPlanning Time: {:.3} ms\n",
+                planning_time.as_f64().unwrap_or(0.0)
+            ));
+        }
+        if let Some(execution_time) = plan_entry.get("Execution Time") {
+            output.push_str(&format!(
+                "Execution Time: {:.3} ms\n",
+                execution_time.as_f64().unwrap_or(0.0)
+            ));
+        }
+    }
+
+    output
+}
+
+fn format_plan_node(node: &serde_json::Value, depth: usize, output: &mut String) {
+    let indent = "  ".repeat(depth);
+
+    let node_type = node
+        .get("Node Type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    let relation = node
+        .get("Relation Name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let alias = node.get("Alias").and_then(|v| v.as_str()).unwrap_or("");
+
+    let startup_cost = node
+        .get("Startup Cost")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let total_cost = node
+        .get("Total Cost")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let actual_startup = node
+        .get("Actual Startup Time")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let actual_total = node
+        .get("Actual Total Time")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let rows = node
+        .get("Actual Rows")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let loops = node
+        .get("Actual Loops")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+
+    let relation_info = if !relation.is_empty() {
+        if !alias.is_empty() && alias != relation {
+            format!(" on {} ({})", relation, alias)
+        } else {
+            format!(" on {}", relation)
+        }
+    } else {
+        String::new()
+    };
+
+    output.push_str(&format!(
+        "{indent}-> {node_type}{relation_info}  (cost={startup_cost:.2}..{total_cost:.2} rows={rows} loops={loops})\n"
+    ));
+    output.push_str(&format!(
+        "{indent}   Actual: {actual_startup:.3}..{actual_total:.3} ms\n"
+    ));
+
+    // Filter
+    if let Some(filter) = node.get("Filter").and_then(|v| v.as_str()) {
+        output.push_str(&format!("{indent}   Filter: {filter}\n"));
+    }
+
+    // Join conditions
+    if let Some(cond) = node.get("Hash Cond").and_then(|v| v.as_str()) {
+        output.push_str(&format!("{indent}   Hash Cond: {cond}\n"));
+    }
+    if let Some(cond) = node.get("Join Filter").and_then(|v| v.as_str()) {
+        output.push_str(&format!("{indent}   Join Filter: {cond}\n"));
+    }
+
+    // Sort key
+    if let Some(sort_key) = node.get("Sort Key").and_then(|v| v.as_array()) {
+        let keys: Vec<&str> = sort_key.iter().filter_map(|v| v.as_str()).collect();
+        output.push_str(&format!("{indent}   Sort Key: {}\n", keys.join(", ")));
+    }
+
+    // Shared buffers
+    if let Some(hit) = node.get("Shared Hit Blocks").and_then(|v| v.as_i64()) {
+        let read = node
+            .get("Shared Read Blocks")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        if hit > 0 || read > 0 {
+            output.push_str(&format!(
+                "{indent}   Buffers: shared hit={hit} read={read}\n"
+            ));
+        }
+    }
+
+    // Child plans
+    if let Some(plans) = node.get("Plans").and_then(|v| v.as_array()) {
+        for child in plans {
+            format_plan_node(child, depth + 1, output);
+        }
     }
 }
