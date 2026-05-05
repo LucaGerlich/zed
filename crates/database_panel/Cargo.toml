@@ -1,0 +1,19 @@
+[package]
+name = "database_panel"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[dependencies]
+pgblade-core.workspace = true
+pgblade-postgres.workspace = true
+pgblade-security.workspace = true
+anyhow.workspace = true
+gpui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ui.workspace = true
+workspace.workspace = true

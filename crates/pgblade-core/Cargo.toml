@@ -1,0 +1,16 @@
+[package]
+name = "pgblade-core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+sqlparser.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

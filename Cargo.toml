@@ -45,6 +45,7 @@ members = [
     "crates/csv_preview",
     "crates/dap",
     "crates/dap_adapters",
+    "crates/database_panel",
     "crates/db",
     "crates/debug_adapter_extension",
     "crates/debugger_tools",
@@ -148,6 +149,9 @@ members = [
     "crates/outline_panel",
     "crates/panel",
     "crates/paths",
+    "crates/pgblade-core",
+    "crates/pgblade-postgres",
+    "crates/pgblade-security",
     "crates/picker",
     "crates/platform_title_bar",
     "crates/prettier",
@@ -309,6 +313,7 @@ crossbeam = "0.8.4"
 csv_preview = { path = "crates/csv_preview"}
 dap = { path = "crates/dap" }
 dap_adapters = { path = "crates/dap_adapters" }
+database_panel = { path = "crates/database_panel" }
 db = { path = "crates/db" }
 debug_adapter_extension = { path = "crates/debug_adapter_extension" }
 debugger_tools = { path = "crates/debugger_tools" }
@@ -407,6 +412,9 @@ outline_panel = { path = "crates/outline_panel" }
 panel = { path = "crates/panel" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf" }
+pgblade-core = { path = "crates/pgblade-core" }
+pgblade-postgres = { path = "crates/pgblade-postgres" }
+pgblade-security = { path = "crates/pgblade-security" }
 picker = { path = "crates/picker" }
 prettier = { path = "crates/prettier" }
 settings_profile_selector = { path = "crates/settings_profile_selector" }
@@ -608,6 +616,7 @@ jsonschema = "0.37.0"
 jsonwebtoken = "10.0"
 jupyter-protocol = "1.4.0"
 jupyter-websocket-client = "1.1.0"
+keyring = "3"
 libc = "0.2"
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 linkify = "0.10.0"
@@ -700,6 +709,7 @@ runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
 ] }
 rust-embed = { version = "8.11", features = ["include-exclude"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 rustc-hash = "2.1.0"
 rustls = { version = "0.23.26" }
 rustls-platform-verifier = "0.5.0"
@@ -723,6 +733,7 @@ slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
 smol = "2.0"
 sqlformat = "0.2"
+sqlparser = { version = "0.55", features = ["visitor"] }
 stacksafe = "0.1"
 streaming-iterator = "0.1"
 strsim = "0.11"
@@ -743,6 +754,7 @@ time = { version = "0.3", features = [
 ] }
 tiny_http = "0.12"
 tokio = { version = "1" }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tokio-socks = { version = "0.5.2", default-features = false, features = [
     "futures-io",
     "tokio",

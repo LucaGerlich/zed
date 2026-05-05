@@ -1,0 +1,100 @@
+pub mod connections;
+pub mod history;
+
+use rusqlite::Connection;
+
+/// Errors originating from the local storage layer.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    #[error("record not found")]
+    NotFound,
+}
+
+/// Manages the local SQLite database used for persisting connection
+/// profiles, query history, and application state.
+pub struct StorageManager {
+    conn: Connection,
+}
+
+impl StorageManager {
+    /// Initializes the storage manager with the default platform data directory.
+    ///
+    /// Creates the directory and database file if they do not exist,
+    /// then runs migrations to ensure the schema is up to date.
+    pub fn init() -> Result<Self, StorageError> {
+        let path = Self::db_path()?;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let conn = Connection::open(&path)?;
+        let manager = Self { conn };
+        manager.run_migrations()?;
+        Ok(manager)
+    }
+
+    /// Creates an in-memory storage manager suitable for tests.
+    pub fn in_memory() -> Result<Self, StorageError> {
+        let conn = Connection::open_in_memory()?;
+        let manager = Self { conn };
+        manager.run_migrations()?;
+        Ok(manager)
+    }
+
+    /// Returns a reference to the underlying SQLite connection.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Resolves the default database file path using platform conventions.
+    fn db_path() -> Result<std::path::PathBuf, StorageError> {
+        let data_dir = dirs::data_dir().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not determine platform data directory",
+            )
+        })?;
+        Ok(data_dir.join("pgblade").join("pgblade.db"))
+    }
+
+    /// Runs schema migrations to create or update tables.
+    fn run_migrations(&self) -> Result<(), StorageError> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS connections (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                host            TEXT NOT NULL,
+                port            INTEGER NOT NULL,
+                database_name   TEXT NOT NULL,
+                username        TEXT NOT NULL,
+                environment     TEXT NOT NULL,
+                ssl_mode        TEXT NOT NULL,
+                read_only_default INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS query_history (
+                id              TEXT PRIMARY KEY,
+                connection_id   TEXT NOT NULL,
+                sql_text        TEXT NOT NULL,
+                classification  TEXT NOT NULL,
+                executed_at     TEXT NOT NULL,
+                duration_ms     INTEGER,
+                row_count       INTEGER,
+                error           TEXT,
+                database_name   TEXT NOT NULL
+            );
+            ",
+        )?;
+        Ok(())
+    }
+}
