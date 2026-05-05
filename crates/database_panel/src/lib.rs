@@ -3,7 +3,8 @@ mod result_panel;
 
 use editor::Editor;
 use editor::actions::SelectAll;
-use gpui::{App, AppContext as _, Context, Window, actions};
+use gpui::{App, AppContext as _, Context, Entity, Window, actions};
+use language;
 use workspace::Workspace;
 
 pub use connection_panel::ConnectionPanel;
@@ -53,22 +54,49 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+fn get_sql_from_editor(editor: &Entity<Editor>, cx: &mut Context<Workspace>) -> Option<String> {
+    let sql = editor.update(cx, |editor, cx| {
+        let snapshot = editor.display_snapshot(cx);
+        let selections = editor.selections.all::<language::Point>(&snapshot);
+        let buffer = editor.buffer().read(cx).read(cx);
+
+        // Use selected text if any selection has content, otherwise full buffer
+        let selected: String = selections
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| buffer.text_for_range(s.start..s.end).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if selected.trim().is_empty() {
+            editor.text(cx)
+        } else {
+            selected
+        }
+    });
+
+    if sql.trim().is_empty() {
+        None
+    } else {
+        Some(sql)
+    }
+}
+
 fn execute_query_action(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    // Get SQL from the active editor
+    // Get SQL from the active editor (selected text or full buffer)
     let Some(active_item) = workspace.active_item(cx) else {
         return;
     };
     let Some(editor) = active_item.act_as::<Editor>(cx) else {
         return;
     };
-    let sql = editor.read(cx).text(cx);
-    if sql.trim().is_empty() {
+    let Some(sql) = get_sql_from_editor(&editor, cx) else {
         return;
-    }
+    };
 
     // Get session from ConnectionPanel
     let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
@@ -112,17 +140,16 @@ fn explain_analyze_action(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    // Get SQL from the active editor
+    // Get SQL from the active editor (selected text or full buffer)
     let Some(active_item) = workspace.active_item(cx) else {
         return;
     };
     let Some(editor) = active_item.act_as::<Editor>(cx) else {
         return;
     };
-    let sql = editor.read(cx).text(cx);
-    if sql.trim().is_empty() {
+    let Some(sql) = get_sql_from_editor(&editor, cx) else {
         return;
-    }
+    };
 
     let explain_sql = format!("EXPLAIN (ANALYZE, COSTS, BUFFERS, FORMAT JSON) {sql}");
 
