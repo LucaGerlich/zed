@@ -14,7 +14,7 @@ pub fn init(cx: &mut App) {
             result_panel::register(workspace);
 
             if let Some(window) = window {
-                let connection = cx.new(|cx| ConnectionPanel::new(cx));
+                let connection = cx.new(|cx| ConnectionPanel::new(window, cx));
                 workspace.add_panel(connection, window, cx);
 
                 let results = cx.new(|cx| ResultPanel::new(cx));

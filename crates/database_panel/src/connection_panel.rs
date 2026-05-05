@@ -1,5 +1,7 @@
+use editor::Editor;
 use gpui::*;
-use ui::IconName;
+use ui::prelude::*;
+use ui::{Button, ButtonStyle, IconName};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -16,42 +18,25 @@ pub fn register(workspace: &mut Workspace) {
     });
 }
 
-/// State for the connection form shown inline in the panel.
-struct ConnectionForm {
-    host: String,
-    port: String,
-    database: String,
-    username: String,
-    password: String,
-    environment: Environment,
-}
-
-impl Default for ConnectionForm {
-    fn default() -> Self {
-        Self {
-            host: "localhost".to_string(),
-            port: "5432".to_string(),
-            database: String::new(),
-            username: "postgres".to_string(),
-            password: String::new(),
-            environment: Environment::Local,
-        }
-    }
-}
-
 pub struct ConnectionPanel {
     focus_handle: FocusHandle,
     active: bool,
-    _width: Option<Pixels>,
     saved_connections: Vec<ConnectionProfile>,
     show_form: bool,
-    form: ConnectionForm,
+    // Form editors
+    host_editor: Entity<Editor>,
+    port_editor: Entity<Editor>,
+    database_editor: Entity<Editor>,
+    username_editor: Entity<Editor>,
+    password_editor: Entity<Editor>,
+    form_environment: Environment,
+    // Storage
     storage: StorageManager,
     credential_store: KeychainStore,
 }
 
 impl ConnectionPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let storage = StorageManager::init().unwrap_or_else(|e| {
             tracing::error!("failed to init storage: {e}");
             StorageManager::in_memory().unwrap()
@@ -59,37 +44,97 @@ impl ConnectionPanel {
 
         let saved = storage.load_connections().unwrap_or_default();
 
+        let host_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("localhost", window, cx);
+            editor.set_text("localhost", window, cx);
+            editor
+        });
+
+        let port_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("5432", window, cx);
+            editor.set_text("5432", window, cx);
+            editor
+        });
+
+        let database_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("database name", window, cx);
+            editor
+        });
+
+        let username_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("postgres", window, cx);
+            editor.set_text("postgres", window, cx);
+            editor
+        });
+
+        let password_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("password", window, cx);
+            editor.set_masked(true, cx);
+            editor
+        });
+
         Self {
             focus_handle: cx.focus_handle(),
             active: false,
-            _width: None,
             saved_connections: saved,
             show_form: false,
-            form: ConnectionForm::default(),
+            host_editor,
+            port_editor,
+            database_editor,
+            username_editor,
+            password_editor,
+            form_environment: Environment::Local,
             storage,
             credential_store: KeychainStore::new(),
         }
     }
 
-    fn toggle_form(&mut self, cx: &mut Context<Self>) {
+    fn toggle_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_form = !self.show_form;
         if self.show_form {
-            self.form = ConnectionForm::default();
+            // Reset editors to defaults
+            self.host_editor.update(cx, |editor, cx| {
+                editor.set_text("localhost", window, cx);
+            });
+            self.port_editor.update(cx, |editor, cx| {
+                editor.set_text("5432", window, cx);
+            });
+            self.database_editor.update(cx, |editor, cx| {
+                editor.set_text("", window, cx);
+            });
+            self.username_editor.update(cx, |editor, cx| {
+                editor.set_text("postgres", window, cx);
+            });
+            self.password_editor.update(cx, |editor, cx| {
+                editor.set_text("", window, cx);
+            });
+            self.form_environment = Environment::Local;
         }
         cx.notify();
     }
 
-    fn save_connection(&mut self, cx: &mut Context<Self>) {
+    fn save_connection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host_editor.read(cx).text(cx);
+        let port_str = self.port_editor.read(cx).text(cx);
+        let database = self.database_editor.read(cx).text(cx);
+        let username = self.username_editor.read(cx).text(cx);
+        let password = self.password_editor.read(cx).text(cx);
+
         let profile = ConnectionProfile {
             id: pgblade_core::connection::ConnectionId::new(),
-            name: format!("{}@{}", self.form.database, self.form.host),
-            host: self.form.host.clone(),
-            port: self.form.port.parse().unwrap_or(5432),
-            database: self.form.database.clone(),
-            username: self.form.username.clone(),
-            environment: self.form.environment,
+            name: format!("{}@{}", database, host),
+            host,
+            port: port_str.parse().unwrap_or(5432),
+            database,
+            username,
+            environment: self.form_environment,
             ssl_mode: pgblade_core::connection::SslMode::Disable,
-            read_only_default: self.form.environment.is_production(),
+            read_only_default: self.form_environment.is_production(),
         };
 
         // Check for duplicates
@@ -99,12 +144,12 @@ impl ConnectionPanel {
             let _ = self.storage.save_connection(&updated);
             let _ = self
                 .credential_store
-                .store(&updated.keychain_service_key(), &self.form.password);
+                .store(&updated.keychain_service_key(), &password);
         } else {
             let _ = self.storage.save_connection(&profile);
             let _ = self
                 .credential_store
-                .store(&profile.keychain_service_key(), &self.form.password);
+                .store(&profile.keychain_service_key(), &password);
         }
 
         self.saved_connections = self.storage.load_connections().unwrap_or_default();
@@ -135,7 +180,7 @@ impl ConnectionPanel {
                 div()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x888888))
+                    .text_color(cx.theme().colors().text_muted)
                     .child("DATABASE NAVIGATOR"),
             )
             .child(
@@ -143,10 +188,10 @@ impl ConnectionPanel {
                     .id("add-connection-btn")
                     .cursor_pointer()
                     .text_sm()
-                    .text_color(rgb(0x888888))
-                    .hover(|s| s.text_color(rgb(0xeeeeee)))
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.toggle_form(cx);
+                    .text_color(cx.theme().colors().text_muted)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_form(window, cx);
                     }))
                     .child("+"),
             )
@@ -161,7 +206,7 @@ impl ConnectionPanel {
                     .px_2()
                     .py_1()
                     .text_xs()
-                    .text_color(rgb(0x555555))
+                    .text_color(cx.theme().colors().text_muted)
                     .child("No connections yet"),
             );
         }
@@ -184,7 +229,7 @@ impl ConnectionPanel {
                     .items_center()
                     .px_2()
                     .rounded_sm()
-                    .hover(|s| s.bg(rgb(0x2a2a2a)))
+                    .hover(|s| s.bg(cx.theme().colors().element_active))
                     .child(
                         div()
                             .w(px(6.0))
@@ -198,15 +243,15 @@ impl ConnectionPanel {
                         div()
                             .flex_1()
                             .text_xs()
-                            .text_color(rgb(0xcccccc))
+                            .text_color(cx.theme().colors().text)
                             .child(name),
                     )
                     .child(
                         div()
                             .id(SharedString::from(format!("del-conn-{i}")))
                             .text_xs()
-                            .text_color(rgb(0x555555))
-                            .hover(|s| s.text_color(rgb(0xf14c4c)))
+                            .text_color(cx.theme().colors().text_muted)
+                            .hover(|s| s.text_color(gpui::red()))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.delete_connection(idx, cx);
@@ -219,76 +264,11 @@ impl ConnectionPanel {
         list
     }
 
-    fn render_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .p_2()
-            .gap_2()
-            .border_t_1()
-            .border_color(rgb(0x333333))
-            .bg(rgb(0x1e1e1e))
-            .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xcccccc))
-                    .child("New Connection"),
-            )
-            // Host + Port row
-            .child(self.render_form_field("Host", &self.form.host, "host-input", cx))
-            .child(self.render_form_field("Port", &self.form.port, "port-input", cx))
-            .child(self.render_form_field("Database", &self.form.database, "db-input", cx))
-            .child(self.render_form_field("Username", &self.form.username, "user-input", cx))
-            .child(self.render_form_field("Password", &self.form.password, "pass-input", cx))
-            // Buttons
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        div()
-                            .id("cancel-btn")
-                            .px_3()
-                            .py_1()
-                            .bg(rgb(0x333333))
-                            .text_xs()
-                            .text_color(rgb(0xcccccc))
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.show_form = false;
-                                cx.notify();
-                            }))
-                            .child("Cancel"),
-                    )
-                    .child(
-                        div()
-                            .id("save-btn")
-                            .px_3()
-                            .py_1()
-                            .bg(rgb(0x4fc1ff))
-                            .text_xs()
-                            .text_color(rgb(0x1a1a1a))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.save_connection(cx);
-                            }))
-                            .child("Save & Connect"),
-                    ),
-            )
-    }
-
-    fn render_form_field(
+    fn render_editor_field(
         &self,
         label: &str,
-        _value: &str,
-        id: &str,
-        _cx: &mut Context<Self>,
+        editor: &Entity<Editor>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         div()
             .flex()
@@ -297,21 +277,113 @@ impl ConnectionPanel {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(0x888888))
+                    .text_color(cx.theme().colors().text_muted)
                     .child(label.to_string()),
             )
             .child(
                 div()
-                    .id(SharedString::from(id.to_string()))
-                    .h(px(24.0))
-                    .px_2()
-                    .bg(rgb(0x252525))
+                    .h(px(28.))
+                    .px_1()
+                    .bg(cx.theme().colors().editor_background)
                     .border_1()
-                    .border_color(rgb(0x3e3e3e))
+                    .border_color(cx.theme().colors().border)
                     .rounded_sm()
+                    .child(editor.clone()),
+            )
+    }
+
+    fn render_environment_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let environments = [
+            (Environment::Local, "Local"),
+            (Environment::Development, "Dev"),
+            (Environment::Staging, "Staging"),
+            (Environment::Production, "Prod"),
+        ];
+
+        let mut row = div().flex().flex_row().gap_1();
+
+        for (env, label) in environments {
+            let is_selected = self.form_environment == env;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("env-{label}")))
+                    .px_2()
+                    .py(px(2.))
                     .text_xs()
-                    .text_color(rgb(0xd4d4d4))
-                    .child(_value.to_string()),
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .when(is_selected, |s| {
+                        s.bg(cx.theme().colors().element_active)
+                            .text_color(cx.theme().colors().text)
+                    })
+                    .when(!is_selected, |s| {
+                        s.text_color(cx.theme().colors().text_muted)
+                            .hover(|s| s.bg(cx.theme().colors().element_active))
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.form_environment = env;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child("Environment"),
+            )
+            .child(row)
+    }
+
+    fn render_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .p_2()
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().surface_background)
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().colors().text)
+                    .child("New Connection"),
+            )
+            .child(self.render_editor_field("Host", &self.host_editor, cx))
+            .child(self.render_editor_field("Port", &self.port_editor, cx))
+            .child(self.render_editor_field("Database", &self.database_editor, cx))
+            .child(self.render_editor_field("Username", &self.username_editor, cx))
+            .child(self.render_editor_field("Password", &self.password_editor, cx))
+            .child(self.render_environment_selector(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .justify_end()
+                    .child(
+                        Button::new("cancel", "Cancel")
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.show_form = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("save-connect", "Save & Connect")
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_connection(window, cx);
+                            })),
+                    ),
             )
     }
 }

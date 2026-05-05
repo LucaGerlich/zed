@@ -4718,7 +4718,9 @@ name = "database_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "editor",
  "gpui",
+ "language",
  "pgblade-core",
  "pgblade-postgres",
  "pgblade-security",
