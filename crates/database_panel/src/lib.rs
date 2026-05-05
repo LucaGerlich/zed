@@ -2,13 +2,17 @@ mod connection_panel;
 mod result_panel;
 
 use editor::Editor;
+use editor::actions::SelectAll;
 use gpui::{App, AppContext as _, Context, Window, actions};
 use workspace::Workspace;
 
 pub use connection_panel::ConnectionPanel;
 pub use result_panel::ResultPanel;
 
-actions!(database_panel, [ExecuteQuery, ViewSessions, ExplainAnalyze]);
+actions!(
+    database_panel,
+    [ExecuteQuery, ViewSessions, ExplainAnalyze, FormatSql]
+);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(
@@ -29,6 +33,11 @@ pub fn init(cx: &mut App) {
             // Register the ExplainAnalyze action on the workspace
             workspace.register_action(|workspace, _: &ExplainAnalyze, window, cx| {
                 explain_analyze_action(workspace, window, cx);
+            });
+
+            // Register the FormatSql action on the workspace
+            workspace.register_action(|workspace, _: &FormatSql, window, cx| {
+                format_sql_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -136,6 +145,34 @@ fn explain_analyze_action(
 
     result_panel.update(cx, |panel, cx| {
         panel.execute_explain(explain_sql, session, runtime, cx);
+    });
+}
+
+/// Format the SQL in the active editor using sqlformat.
+fn format_sql_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let text = editor.read(cx).text(cx);
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let options = sqlformat::FormatOptions {
+        indent: sqlformat::Indent::Spaces(4),
+        uppercase: true,
+        lines_between_queries: 2,
+        ..Default::default()
+    };
+
+    let formatted = sqlformat::format(&text, &sqlformat::QueryParams::None, options);
+
+    editor.update(cx, |editor, cx| {
+        editor.select_all(&SelectAll, window, cx);
+        editor.insert(&formatted, window, cx);
     });
 }
 

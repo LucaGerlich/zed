@@ -381,6 +381,36 @@ impl ConnectionPanel {
         }
     }
 
+    /// Generate a SELECT statement for a table and insert it into the active editor.
+    fn generate_select(
+        &self,
+        schema: &str,
+        table: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sql = format!("SELECT *\nFROM \"{schema}\".\"{table}\"\nLIMIT 100;\n");
+
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                if let Some(active_item) = workspace.active_item(cx) {
+                    if let Some(editor) = active_item.act_as::<Editor>(cx) {
+                        editor.update(cx, |editor, cx| {
+                            let text = editor.text(cx);
+                            let insert_text = if text.is_empty() {
+                                sql
+                            } else {
+                                format!("\n\n{sql}")
+                            };
+                            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+                            editor.insert(&insert_text, window, cx);
+                        });
+                    }
+                }
+            });
+        }
+    }
+
     /// Show DDL for a table by finding it in the schema tree and generating the statement.
     fn show_ddl(&self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tree) = &self.schema_tree else {
@@ -569,7 +599,7 @@ impl ConnectionPanel {
     }
 
     /// Render a table row that expands on click AND triggers data preview.
-    /// Also includes a DDL button visible on hover.
+    /// Also includes DDL and SQL buttons visible on hover.
     fn render_table_row(
         &self,
         node_id: &str,
@@ -584,11 +614,14 @@ impl ConnectionPanel {
 
         let id = SharedString::from(format!("tree-{node_id}"));
         let ddl_id = SharedString::from(format!("ddl-{node_id}"));
+        let sql_id = SharedString::from(format!("sql-{node_id}"));
         let node_id_owned = node_id.to_string();
         let schema_owned = schema_name.to_string();
         let table_owned = table_name.to_string();
         let schema_for_ddl = schema_name.to_string();
         let table_for_ddl = table_name.to_string();
+        let schema_for_sql = schema_name.to_string();
+        let table_for_sql = table_name.to_string();
 
         div()
             .id(id)
@@ -619,6 +652,19 @@ impl ConnectionPanel {
                     .child(chevron.to_string()),
             )
             .child(div().flex_1().child(table_name.to_string()))
+            .child(
+                div()
+                    .id(sql_id)
+                    .text_xs()
+                    .mr_1()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.generate_select(&schema_for_sql, &table_for_sql, window, cx);
+                    }))
+                    .child("SQL"),
+            )
             .child(
                 div()
                     .id(ddl_id)

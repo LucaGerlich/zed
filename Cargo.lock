@@ -4726,6 +4726,7 @@ dependencies = [
  "pgblade-security",
  "serde",
  "serde_json",
+ "sqlformat",
  "tokio",
  "tracing",
  "ui",

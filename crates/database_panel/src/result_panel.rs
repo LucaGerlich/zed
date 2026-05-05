@@ -202,6 +202,52 @@ impl ResultPanel {
         cx.write_to_clipboard(ClipboardItem::new_string(json));
     }
 
+    /// Export current result set as INSERT statements to clipboard.
+    fn export_insert(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = &self.state else {
+            return;
+        };
+
+        let col_names = columns
+            .iter()
+            .map(|c| format!("\"{}\"", c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut sql = String::new();
+        for row in rows {
+            let values: Vec<String> = row
+                .iter()
+                .map(|cell| match cell {
+                    CellValue::Null => "NULL".to_string(),
+                    CellValue::Boolean(b) => b.to_string(),
+                    CellValue::Integer(n) => n.to_string(),
+                    CellValue::Float(f) => f.to_string(),
+                    CellValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+                    CellValue::Json(s) => format!("'{}'", s.replace('\'', "''")),
+                    CellValue::Bytes(b) => {
+                        let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
+                        format!("'\\x{hex}'")
+                    }
+                    CellValue::Timestamp(s)
+                    | CellValue::Date(s)
+                    | CellValue::Time(s)
+                    | CellValue::Uuid(s) => format!("'{}'", s.replace('\'', "''")),
+                    CellValue::Array(items) => {
+                        let inner: Vec<String> = items.iter().map(|v| v.display()).collect();
+                        format!("'{{{}}}'", inner.join(","))
+                    }
+                })
+                .collect();
+            sql.push_str(&format!(
+                "INSERT INTO your_table ({col_names}) VALUES ({});\n",
+                values.join(", ")
+            ));
+        }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(sql));
+    }
+
     fn render_empty(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .size_full()
@@ -578,6 +624,12 @@ impl ResultPanel {
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
                             .on_click(cx.listener(|this, _, _window, cx| this.export_json(cx))),
+                    )
+                    .child(
+                        Button::new("export-insert", "INSERT")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.export_insert(cx))),
                     ),
             )
     }
