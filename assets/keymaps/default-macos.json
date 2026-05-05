@@ -1642,4 +1642,10 @@
       "shift-tab": "git_graph::FocusPreviousTabStop",
     },
   },
+  {
+    "context": "Editor && mode == full",
+    "bindings": {
+      "cmd-enter": "database_panel::ExecuteQuery",
+    },
+  },
 ]

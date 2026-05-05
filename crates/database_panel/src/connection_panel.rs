@@ -1,13 +1,18 @@
+use std::sync::Arc;
+
 use editor::Editor;
 use gpui::*;
+use tokio::runtime::Runtime;
 use ui::prelude::*;
 use ui::{Button, ButtonStyle, IconName};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use pgblade_core::connection::{ConnectionProfile, Environment};
+use pgblade_core::driver::{DatabaseDriver, DatabaseSession};
 use pgblade_core::security::CredentialStore;
 use pgblade_core::storage::StorageManager;
+use pgblade_postgres::PostgresDriver;
 use pgblade_security::KeychainStore;
 
 actions!(database_panel, [ToggleFocus, AddConnection]);
@@ -33,6 +38,11 @@ pub struct ConnectionPanel {
     // Storage
     storage: StorageManager,
     credential_store: KeychainStore,
+    // Database connection
+    runtime: Arc<Runtime>,
+    driver: PostgresDriver,
+    session: Option<Arc<dyn DatabaseSession>>,
+    connected_profile: Option<ConnectionProfile>,
 }
 
 impl ConnectionPanel {
@@ -78,6 +88,14 @@ impl ConnectionPanel {
             editor
         });
 
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create tokio runtime"),
+        );
+        let driver = PostgresDriver::new(runtime.clone());
+
         Self {
             focus_handle: cx.focus_handle(),
             active: false,
@@ -91,6 +109,10 @@ impl ConnectionPanel {
             form_environment: Environment::Local,
             storage,
             credential_store: KeychainStore::new(),
+            runtime,
+            driver,
+            session: None,
+            connected_profile: None,
         }
     }
 
@@ -155,6 +177,52 @@ impl ConnectionPanel {
         self.saved_connections = self.storage.load_connections().unwrap_or_default();
         self.show_form = false;
         cx.notify();
+
+        // Connect to the database
+        self.connect(profile, password, cx);
+    }
+
+    fn connect(&mut self, profile: ConnectionProfile, password: String, cx: &mut Context<Self>) {
+        let driver = self.driver.clone();
+        let runtime = self.runtime.clone();
+        let connect_profile = profile.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { driver.connect(&connect_profile, &password).await })
+                .await;
+
+            match result {
+                Ok(Ok(session)) => {
+                    let session: Arc<dyn DatabaseSession> = Arc::from(session);
+                    this.update(cx, |panel, cx| {
+                        panel.session = Some(session);
+                        panel.connected_profile = Some(profile);
+                        tracing::info!("database connection established");
+                        cx.emit(PanelEvent::Activate);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("connection failed: {e}");
+                }
+                Err(e) => {
+                    tracing::error!("runtime error: {e}");
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Returns the active database session, if connected.
+    pub fn session(&self) -> Option<Arc<dyn DatabaseSession>> {
+        self.session.clone()
+    }
+
+    /// Returns the tokio runtime used for database operations.
+    pub fn runtime(&self) -> Arc<Runtime> {
+        self.runtime.clone()
     }
 
     fn delete_connection(&mut self, index: usize, cx: &mut Context<Self>) {
