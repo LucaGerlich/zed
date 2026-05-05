@@ -198,6 +198,19 @@ impl ConnectionPanel {
         self.connect(profile, password, cx);
     }
 
+    fn connect_saved(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.saved_connections.get(index).cloned() else {
+            return;
+        };
+        let password = self
+            .credential_store
+            .retrieve(&profile.keychain_service_key())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        self.connect(profile, password, cx);
+    }
+
     fn connect(&mut self, profile: ConnectionProfile, password: String, cx: &mut Context<Self>) {
         let driver = self.driver.clone();
         let runtime = self.runtime.clone();
@@ -993,6 +1006,7 @@ impl ConnectionPanel {
             let name = conn.name.clone();
             let idx = i;
 
+            let connect_idx = i;
             list = list.child(
                 div()
                     .id(SharedString::from(format!("conn-{i}")))
@@ -1002,7 +1016,11 @@ impl ConnectionPanel {
                     .items_center()
                     .px_2()
                     .rounded_sm()
+                    .cursor_pointer()
                     .hover(|s| s.bg(cx.theme().colors().element_active))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.connect_saved(connect_idx, cx);
+                    }))
                     .child(
                         div()
                             .w(px(6.0))
