@@ -624,7 +624,7 @@ impl ConnectionPanel {
         self.expanded_nodes.contains(node_id)
     }
 
-    /// Preview table data by executing SELECT * FROM ... LIMIT 100
+    /// Preview table data by executing SELECT * FROM ... (result panel handles LIMIT).
     fn preview_table(
         &self,
         schema: &str,
@@ -636,7 +636,7 @@ impl ConnectionPanel {
             return;
         };
         let runtime = self.runtime.clone();
-        let sql = format!("SELECT * FROM \"{schema}\".\"{table}\" LIMIT 100");
+        let sql = format!("SELECT * FROM \"{schema}\".\"{table}\"");
         let source_table = Some((schema.to_string(), table.to_string()));
 
         if let Some(workspace) = self.workspace.upgrade() {

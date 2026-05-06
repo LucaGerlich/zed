@@ -48,6 +48,10 @@ struct ResultTab {
     session: Option<Arc<dyn DatabaseSession>>,
     /// The runtime used to execute the query (for refresh).
     runtime: Option<Arc<Runtime>>,
+    /// Current row limit for pagination (increases with "Load More").
+    row_limit: usize,
+    /// Whether the last query returned exactly the limit (more rows likely available).
+    has_more: bool,
 }
 
 pub struct ResultPanel {
@@ -73,6 +77,8 @@ impl ResultPanel {
                 sql: None,
                 session: None,
                 runtime: None,
+                row_limit: 500,
+                has_more: false,
             }],
             active_tab: 0,
             selected_row: None,
@@ -99,8 +105,16 @@ impl ResultPanel {
         source_table: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) {
-        let label: String = sql.chars().take(30).collect();
+        let label: String = {
+            let preview: String = sql.trim().chars().take(40).collect();
+            if preview.is_empty() {
+                "Query".to_string()
+            } else {
+                preview
+            }
+        };
         self.selected_row = None;
+        let row_limit = 500usize;
         self.tabs.push(ResultTab {
             label,
             state: ResultState::Loading,
@@ -110,6 +124,8 @@ impl ResultPanel {
             sql: Some(sql.clone()),
             session: Some(session.clone()),
             runtime: Some(runtime.clone()),
+            row_limit,
+            has_more: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -117,9 +133,20 @@ impl ResultPanel {
         let tab_idx = self.active_tab;
         let started = std::time::Instant::now();
 
+        // Add LIMIT to the query if not already present
+        let sql_with_limit = if sql.to_uppercase().contains(" LIMIT ") {
+            sql.clone()
+        } else {
+            format!(
+                "{} LIMIT {}",
+                sql.trim().trim_end_matches(';'),
+                row_limit + 1
+            )
+        };
+
         cx.spawn(async move |this, cx| {
             let result = runtime
-                .spawn(async move { session.execute(&sql).await })
+                .spawn(async move { session.execute(&sql_with_limit).await })
                 .await;
 
             let elapsed = started.elapsed().as_millis();
@@ -127,12 +154,18 @@ impl ResultPanel {
             this.update(cx, |panel, cx| {
                 if let Some(tab) = panel.tabs.get_mut(tab_idx) {
                     match result {
-                        Ok(Ok(result_set)) => {
+                        Ok(Ok(mut result_set)) => {
+                            let has_more = result_set.rows.len() > row_limit;
+                            if has_more {
+                                result_set.rows.truncate(row_limit);
+                            }
                             tab.state = ResultState::Success {
                                 columns: result_set.columns,
                                 rows: result_set.rows,
                                 duration_ms: elapsed,
                             };
+                            tab.has_more = has_more;
+                            tab.row_limit = row_limit;
                         }
                         Ok(Err(e)) => {
                             tab.state = ResultState::Error(e.to_string());
@@ -170,6 +203,8 @@ impl ResultPanel {
             sql: None,
             session: None,
             runtime: None,
+            row_limit: 500,
+            has_more: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -187,6 +222,8 @@ impl ResultPanel {
             sql: None,
             session: None,
             runtime: None,
+            row_limit: 500,
+            has_more: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -210,6 +247,8 @@ impl ResultPanel {
             sql: None,
             session: None,
             runtime: None,
+            row_limit: 500,
+            has_more: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -281,18 +320,164 @@ impl ResultPanel {
         let Some(runtime) = tab.runtime.clone() else {
             return;
         };
+        let row_limit = tab.row_limit;
 
         self.tabs[self.active_tab].state = ResultState::Loading;
+        self.tabs[self.active_tab].has_more = false;
         cx.notify();
 
         let tab_idx = self.active_tab;
         let started = std::time::Instant::now();
 
+        // Add LIMIT to the query if not already present
+        let sql_with_limit = if sql.to_uppercase().contains(" LIMIT ") {
+            sql.clone()
+        } else {
+            format!(
+                "{} LIMIT {}",
+                sql.trim().trim_end_matches(';'),
+                row_limit + 1
+            )
+        };
+
         cx.spawn(async move |this, cx| {
             let result = runtime
-                .spawn(async move { session.execute(&sql).await })
+                .spawn(async move { session.execute(&sql_with_limit).await })
                 .await;
 
+            let elapsed = started.elapsed().as_millis();
+
+            this.update(cx, |panel, cx| {
+                if let Some(tab) = panel.tabs.get_mut(tab_idx) {
+                    match result {
+                        Ok(Ok(mut result_set)) => {
+                            let has_more = result_set.rows.len() > row_limit;
+                            if has_more {
+                                result_set.rows.truncate(row_limit);
+                            }
+                            tab.state = ResultState::Success {
+                                columns: result_set.columns,
+                                rows: result_set.rows,
+                                duration_ms: elapsed,
+                            };
+                            tab.has_more = has_more;
+                            tab.sort_column = None;
+                            tab.sort_ascending = true;
+                        }
+                        Ok(Err(e)) => {
+                            tab.state = ResultState::Error(e.to_string());
+                        }
+                        Err(e) => {
+                            tab.state = ResultState::Error(format!("runtime error: {e}"));
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Load more rows by re-executing with a higher limit.
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        let tab = &mut self.tabs[self.active_tab];
+        let Some(sql) = tab.sql.clone() else {
+            return;
+        };
+        let Some(session) = tab.session.clone() else {
+            return;
+        };
+        let Some(runtime) = tab.runtime.clone() else {
+            return;
+        };
+
+        // Increase the limit
+        let new_limit = tab.row_limit + 500;
+        tab.row_limit = new_limit;
+        tab.state = ResultState::Loading;
+        tab.has_more = false;
+        cx.notify();
+
+        let tab_idx = self.active_tab;
+        let started = std::time::Instant::now();
+
+        // Re-execute with higher limit
+        let sql_with_limit = if sql.to_uppercase().contains(" LIMIT ") {
+            sql.clone()
+        } else {
+            format!(
+                "{} LIMIT {}",
+                sql.trim().trim_end_matches(';'),
+                new_limit + 1
+            )
+        };
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { session.execute(&sql_with_limit).await })
+                .await;
+            let elapsed = started.elapsed().as_millis();
+
+            this.update(cx, |panel, cx| {
+                if let Some(tab) = panel.tabs.get_mut(tab_idx) {
+                    match result {
+                        Ok(Ok(mut result_set)) => {
+                            let has_more = result_set.rows.len() > new_limit;
+                            if has_more {
+                                result_set.rows.truncate(new_limit);
+                            }
+                            tab.state = ResultState::Success {
+                                columns: result_set.columns,
+                                rows: result_set.rows,
+                                duration_ms: elapsed,
+                            };
+                            tab.has_more = has_more;
+                            tab.sort_column = None;
+                            tab.sort_ascending = true;
+                        }
+                        Ok(Err(e)) => {
+                            tab.state = ResultState::Error(e.to_string());
+                        }
+                        Err(e) => {
+                            tab.state = ResultState::Error(format!("runtime error: {e}"));
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Load all rows by re-executing the query without any automatic LIMIT.
+    fn load_all(&mut self, cx: &mut Context<Self>) {
+        let tab = &mut self.tabs[self.active_tab];
+        let Some(sql) = tab.sql.clone() else {
+            return;
+        };
+        let Some(session) = tab.session.clone() else {
+            return;
+        };
+        let Some(runtime) = tab.runtime.clone() else {
+            return;
+        };
+
+        tab.state = ResultState::Loading;
+        tab.has_more = false;
+        cx.notify();
+
+        let tab_idx = self.active_tab;
+        let started = std::time::Instant::now();
+
+        // Execute original SQL without adding LIMIT
+        let sql_no_limit = sql.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { session.execute(&sql_no_limit).await })
+                .await;
             let elapsed = started.elapsed().as_millis();
 
             this.update(cx, |panel, cx| {
@@ -304,6 +489,8 @@ impl ResultPanel {
                                 rows: result_set.rows,
                                 duration_ms: elapsed,
                             };
+                            tab.has_more = false;
+                            tab.row_limit = usize::MAX;
                             tab.sort_column = None;
                             tab.sort_ascending = true;
                         }
@@ -335,6 +522,8 @@ impl ResultPanel {
             sql: None,
             session: None,
             runtime: None,
+            row_limit: 500,
+            has_more: false,
         });
         self.active_tab = 0;
         cx.notify();
@@ -414,6 +603,8 @@ impl ResultPanel {
             sql: None,
             session,
             runtime,
+            row_limit: 500,
+            has_more: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -473,6 +664,8 @@ impl ResultPanel {
             sql: None,
             session,
             runtime,
+            row_limit: 500,
+            has_more: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -1193,9 +1386,18 @@ impl ResultPanel {
     ) -> impl IntoElement {
         let row_word = if row_count == 1 { "row" } else { "rows" };
         let has_selected = self.selected_row.is_some();
+        let has_more = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.has_more)
+            .unwrap_or(false);
 
-        // Left: row count + timing
-        let left_info = format!("{row_count} {row_word} in {duration_ms}ms");
+        // Left: row count + timing (indicate truncation when has_more)
+        let left_info = if has_more {
+            format!("{row_count}+ rows (limited) in {duration_ms}ms")
+        } else {
+            format!("{row_count} {row_word} in {duration_ms}ms")
+        };
         // Center: tab indicator
         let center_info = format!("Tab {} / {}", self.active_tab + 1, self.tabs.len());
         // Selected row info
@@ -1237,6 +1439,26 @@ impl ResultPanel {
                 .size(LabelSize::XSmall)
                 .color(Color::Disabled),
         );
+
+        // Load More / Load All buttons when results are truncated
+        if has_more {
+            footer = footer.child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("load-more", "Load 500 more")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.load_more(cx))),
+                    )
+                    .child(
+                        Button::new("load-all", "Load All")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.load_all(cx))),
+                    ),
+            );
+        }
 
         // Right side: action buttons
         let mut buttons = h_flex().flex_1().justify_end().gap_0p5();
