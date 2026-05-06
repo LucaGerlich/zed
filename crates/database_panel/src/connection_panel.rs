@@ -791,6 +791,26 @@ impl ConnectionPanel {
         self.insert_sql_into_editor(&sql, window, cx);
     }
 
+    /// Generate a CREATE INDEX template for a table and insert it into the active editor.
+    fn generate_create_index(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let first_col = columns
+            .first()
+            .map(|c| c.trim_matches('"'))
+            .unwrap_or("column_name");
+        let safe_col = first_col.replace('"', "");
+        let sql = format!(
+            "CREATE INDEX IF NOT EXISTS idx_{table}_{safe_col}\n    ON \"{schema}\".\"{table}\" ({first_col});"
+        );
+        self.insert_sql_into_editor(&sql, window, cx);
+    }
+
     /// Insert SQL text into the active editor at the end.
     fn insert_sql_into_editor(&self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(workspace) = self.workspace.upgrade() {
@@ -1339,6 +1359,9 @@ impl ConnectionPanel {
         let schema_for_upd = schema_name.to_string();
         let table_for_upd = table_name.to_string();
         let cols_for_upd = columns.to_vec();
+        let schema_for_idx = schema_name.to_string();
+        let table_for_idx = table_name.to_string();
+        let cols_for_idx = columns.to_vec();
         let schema_for_ddl = schema_name.to_string();
         let table_for_ddl = table_name.to_string();
         let schema_for_cnt = schema_name.to_string();
@@ -1392,6 +1415,20 @@ impl ConnectionPanel {
                             &schema_for_upd,
                             &table_for_upd,
                             &cols_for_upd,
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("idx-{node_id}")), "IDX")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.generate_create_index(
+                            &schema_for_idx,
+                            &table_for_idx,
+                            &cols_for_idx,
                             window,
                             cx,
                         );

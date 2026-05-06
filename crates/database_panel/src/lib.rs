@@ -59,7 +59,13 @@ actions!(
         ViewForeignTables,
         CreateFunction,
         CreateTrigger,
-        ShowShortcuts
+        ShowShortcuts,
+        StatStatements,
+        TableAccessStats,
+        ActiveQueries,
+        ConnectionLimits,
+        MaintenanceRecommendations,
+        DuplicateIndexes
     ]
 );
 
@@ -297,6 +303,36 @@ pub fn init(cx: &mut App) {
             // Register the ShowShortcuts action on the workspace
             workspace.register_action(|workspace, _: &ShowShortcuts, window, cx| {
                 show_shortcuts_action(workspace, window, cx);
+            });
+
+            // Register the StatStatements action on the workspace
+            workspace.register_action(|workspace, _: &StatStatements, window, cx| {
+                stat_statements_action(workspace, window, cx);
+            });
+
+            // Register the TableAccessStats action on the workspace
+            workspace.register_action(|workspace, _: &TableAccessStats, window, cx| {
+                table_access_stats_action(workspace, window, cx);
+            });
+
+            // Register the ActiveQueries action on the workspace
+            workspace.register_action(|workspace, _: &ActiveQueries, window, cx| {
+                active_queries_action(workspace, window, cx);
+            });
+
+            // Register the ConnectionLimits action on the workspace
+            workspace.register_action(|workspace, _: &ConnectionLimits, window, cx| {
+                connection_limits_action(workspace, window, cx);
+            });
+
+            // Register the MaintenanceRecommendations action on the workspace
+            workspace.register_action(|workspace, _: &MaintenanceRecommendations, window, cx| {
+                maintenance_recommendations_action(workspace, window, cx);
+            });
+
+            // Register the DuplicateIndexes action on the workspace
+            workspace.register_action(|workspace, _: &DuplicateIndexes, window, cx| {
+                duplicate_indexes_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -1555,7 +1591,9 @@ All actions are available in the command palette:
   Sequence Values, Column Stats, Compare Schemas,
   Dump Schema, ER Diagram, Import CSV, View History,
   Search Objects, Disconnect, Create Function, Create Trigger,
-  Show Shortcuts";
+  Stat Statements, Table Access Stats, Active Queries,
+  Connection Limits, Maintenance Recommendations,
+  Duplicate Indexes, Show Shortcuts";
 
     workspace.open_panel::<ResultPanel>(window, cx);
     if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
@@ -1563,6 +1601,155 @@ All actions are available in the command palette:
             panel.show_ddl(shortcuts.to_string(), cx);
         });
     }
+}
+
+/// Show the top queries by total execution time from pg_stat_statements.
+/// Requires the pg_stat_statements extension to be installed.
+fn stat_statements_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        calls, \
+        round(total_exec_time::numeric, 2) AS total_time_ms, \
+        round(mean_exec_time::numeric, 2) AS avg_time_ms, \
+        round(max_exec_time::numeric, 2) AS max_time_ms, \
+        rows, \
+        shared_blks_hit + shared_blks_read AS total_blks, \
+        CASE WHEN shared_blks_hit + shared_blks_read > 0 \
+            THEN round(100.0 * shared_blks_hit / (shared_blks_hit + shared_blks_read), 1) \
+            ELSE 0 END AS cache_hit_pct, \
+        LEFT(query, 300) AS query \
+    FROM pg_stat_statements \
+    WHERE userid = (SELECT usesysid FROM pg_user WHERE usename = current_user) \
+    ORDER BY total_exec_time DESC \
+    LIMIT 25";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show table access statistics ordered by total scans.
+fn table_access_stats_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        schemaname || '.' || relname AS table_name, \
+        seq_scan, \
+        seq_tup_read, \
+        idx_scan, \
+        idx_tup_fetch, \
+        n_tup_ins AS inserts, \
+        n_tup_upd AS updates, \
+        n_tup_del AS deletes, \
+        n_tup_hot_upd AS hot_updates, \
+        n_live_tup AS live_rows, \
+        n_dead_tup AS dead_rows \
+    FROM pg_stat_user_tables \
+    ORDER BY seq_scan + COALESCE(idx_scan, 0) DESC \
+    LIMIT 30";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show currently active queries (excluding this session).
+fn active_queries_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pid, \
+        usename AS user_name, \
+        datname AS database, \
+        state, \
+        now() - query_start AS duration, \
+        wait_event_type, \
+        wait_event, \
+        LEFT(query, 500) AS query \
+    FROM pg_stat_activity \
+    WHERE state = 'active' \
+        AND pid != pg_backend_pid() \
+    ORDER BY query_start \
+    LIMIT 50";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show database connection limits per role with current usage.
+fn connection_limits_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        rolname AS role, \
+        rolconnlimit AS max_connections, \
+        (SELECT count(*) FROM pg_stat_activity WHERE usename = rolname) AS current_connections, \
+        CASE WHEN rolconnlimit > 0 \
+            THEN round(100.0 * (SELECT count(*) FROM pg_stat_activity WHERE usename = rolname) / rolconnlimit, 1) \
+            ELSE 0 END AS usage_pct \
+    FROM pg_roles \
+    WHERE rolcanlogin = true \
+    ORDER BY current_connections DESC";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show tables that need maintenance (vacuum, analyze, reindex).
+fn maintenance_recommendations_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        schemaname || '.' || relname AS table_name, \
+        n_live_tup AS live_rows, \
+        n_dead_tup AS dead_rows, \
+        CASE WHEN n_live_tup > 0 THEN round(100.0 * n_dead_tup / n_live_tup, 1) ELSE 0 END AS bloat_pct, \
+        last_vacuum::date AS last_vacuum, \
+        last_autovacuum::date AS last_autovacuum, \
+        last_analyze::date AS last_analyze, \
+        last_autoanalyze::date AS last_autoanalyze, \
+        CASE \
+            WHEN n_dead_tup > n_live_tup * 0.2 THEN 'VACUUM NEEDED' \
+            WHEN last_analyze IS NULL AND last_autoanalyze IS NULL THEN 'ANALYZE NEEDED' \
+            WHEN last_vacuum IS NULL AND last_autovacuum IS NULL AND n_dead_tup > 1000 THEN 'VACUUM RECOMMENDED' \
+            ELSE 'OK' \
+        END AS recommendation \
+    FROM pg_stat_user_tables \
+    WHERE n_dead_tup > 100 OR last_analyze IS NULL \
+    ORDER BY n_dead_tup DESC \
+    LIMIT 30";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Find duplicate indexes that waste disk space.
+fn duplicate_indexes_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pg_size_pretty(sum(pg_relation_size(idx))::bigint) AS total_size, \
+        array_agg(idx) AS indexes, \
+        (array_agg(idx))[1] AS table_name, \
+        array_agg(pg_get_indexdef(idx)) AS definitions \
+    FROM ( \
+        SELECT indexrelid::regclass AS idx, \
+            (indrelid::text || E'\\n' || indclass::text || E'\\n' || \
+             indkey::text || E'\\n' || coalesce(indexprs::text, '') || \
+             E'\\n' || coalesce(indpred::text, '')) AS key \
+        FROM pg_index \
+    ) sub \
+    GROUP BY key \
+    HAVING count(*) > 1 \
+    ORDER BY sum(pg_relation_size(idx)) DESC";
+
+    execute_system_query(workspace, sql, window, cx);
 }
 
 /// Insert a CREATE TRIGGER template into the active editor.
