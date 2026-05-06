@@ -42,7 +42,12 @@ actions!(
         ViewDefinition,
         ColumnStats,
         VacuumProgress,
-        CacheHitRatio
+        CacheHitRatio,
+        ViewSettings,
+        SequenceValues,
+        ViewDependencies,
+        ConnectionStats,
+        WalStatus
     ]
 );
 
@@ -192,6 +197,31 @@ pub fn init(cx: &mut App) {
             // Register the CacheHitRatio action on the workspace
             workspace.register_action(|workspace, _: &CacheHitRatio, window, cx| {
                 cache_hit_ratio_action(workspace, window, cx);
+            });
+
+            // Register the ViewSettings action on the workspace
+            workspace.register_action(|workspace, _: &ViewSettings, window, cx| {
+                view_settings_action(workspace, window, cx);
+            });
+
+            // Register the SequenceValues action on the workspace
+            workspace.register_action(|workspace, _: &SequenceValues, window, cx| {
+                sequence_values_action(workspace, window, cx);
+            });
+
+            // Register the ViewDependencies action on the workspace
+            workspace.register_action(|workspace, _: &ViewDependencies, window, cx| {
+                view_dependencies_action(workspace, window, cx);
+            });
+
+            // Register the ConnectionStats action on the workspace
+            workspace.register_action(|workspace, _: &ConnectionStats, window, cx| {
+                connection_stats_action(workspace, window, cx);
+            });
+
+            // Register the WalStatus action on the workspace
+            workspace.register_action(|workspace, _: &WalStatus, window, cx| {
+                wal_status_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -1120,6 +1150,115 @@ fn cache_hit_ratio_action(
             ELSE 0 END \
     FROM pg_stat_database \
     WHERE datname = current_database()";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show non-default and important PostgreSQL settings.
+fn view_settings_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT name, setting, unit, short_desc, source, boot_val \
+    FROM pg_settings \
+    WHERE source != 'default' OR name IN ('max_connections', 'shared_buffers', 'work_mem', \
+        'maintenance_work_mem', 'effective_cache_size', 'random_page_cost', 'wal_level', \
+        'max_wal_size', 'checkpoint_completion_target', 'log_min_duration_statement', \
+        'autovacuum', 'timezone') \
+    ORDER BY name";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show sequence values for user schemas.
+fn sequence_values_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT schemaname AS schema, sequencename AS sequence, \
+        data_type, start_value, min_value, max_value, increment_by, \
+        last_value, cycle AS is_cyclic, cache_size \
+    FROM pg_sequences \
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+    ORDER BY schemaname, sequencename";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show table dependencies (what depends on the selected table).
+/// Reads the table name from the selected text in the active editor.
+fn view_dependencies_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table_name = selected.trim().replace('\'', "''");
+
+    let sql = format!(
+        "SELECT DISTINCT \
+            d.classid::regclass AS source_type, \
+            d.objid::regclass AS dependent_object, \
+            d.deptype AS dependency_type \
+        FROM pg_depend d \
+        JOIN pg_class c ON c.oid = d.refobjid \
+        WHERE c.relname = '{table_name}' \
+            AND d.deptype IN ('n', 'a') \
+            AND d.classid = 'pg_class'::regclass \
+        UNION \
+        SELECT \
+            'foreign_key' AS source_type, \
+            conrelid::regclass AS dependent_object, \
+            'fk: ' || conname AS dependency_type \
+        FROM pg_constraint \
+        WHERE confrelid = (SELECT oid FROM pg_class WHERE relname = '{table_name}') \
+        ORDER BY dependent_object"
+    );
+    execute_system_query(workspace, &sql, window, cx);
+}
+
+/// Show database connection statistics grouped by database.
+fn connection_stats_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        datname AS database, \
+        count(*) AS total, \
+        count(*) FILTER (WHERE state = 'active') AS active, \
+        count(*) FILTER (WHERE state = 'idle') AS idle, \
+        count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx, \
+        count(*) FILTER (WHERE wait_event_type IS NOT NULL) AS waiting, \
+        max(now() - query_start) FILTER (WHERE state = 'active') AS longest_query \
+    FROM pg_stat_activity \
+    WHERE datname IS NOT NULL \
+    GROUP BY datname \
+    ORDER BY total DESC";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show WAL (Write-Ahead Log) status and configuration.
+fn wal_status_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "SELECT \
+        pg_walfile_name(pg_current_wal_lsn()) AS current_wal_file, \
+        pg_current_wal_lsn() AS current_lsn, \
+        pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')) AS total_wal_generated, \
+        (SELECT count(*) FROM pg_ls_waldir()) AS wal_files_count, \
+        pg_size_pretty((SELECT sum(size) FROM pg_ls_waldir())) AS wal_directory_size, \
+        (SELECT setting FROM pg_settings WHERE name = 'wal_level') AS wal_level, \
+        (SELECT setting FROM pg_settings WHERE name = 'max_wal_size') AS max_wal_size";
 
     execute_system_query(workspace, sql, window, cx);
 }

@@ -703,6 +703,18 @@ impl ConnectionPanel {
         self.execute_in_result_panel(&sql, window, cx);
     }
 
+    /// Refresh a materialized view.
+    fn refresh_materialized_view(
+        &self,
+        schema: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sql = format!("REFRESH MATERIALIZED VIEW \"{schema}\".\"{name}\"");
+        self.execute_in_result_panel(&sql, window, cx);
+    }
+
     /// Show DDL for a table by finding it in the schema tree and generating the statement.
     fn show_ddl(&self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tree) = &self.schema_tree else {
@@ -1004,6 +1016,7 @@ impl ConnectionPanel {
         let trunc_id = SharedString::from(format!("trunc-{node_id}"));
         let vac_id = SharedString::from(format!("vac-{node_id}"));
         let def_id = SharedString::from(format!("def-{node_id}"));
+        let ref_id = SharedString::from(format!("ref-{node_id}"));
         let node_id_owned = node_id.to_string();
         let schema_owned = schema_name.to_string();
         let table_owned = table_name.to_string();
@@ -1024,7 +1037,10 @@ impl ConnectionPanel {
         let schema_for_vac = schema_name.to_string();
         let table_for_vac = table_name.to_string();
         let table_for_def = table_name.to_string();
+        let schema_for_ref = schema_name.to_string();
+        let table_for_ref = table_name.to_string();
         let show_def_button = matches!(kind, TableKind::View | TableKind::MaterializedView);
+        let show_ref_button = matches!(kind, TableKind::MaterializedView);
 
         let mut row = div()
             .id(id)
@@ -1134,6 +1150,23 @@ impl ConnectionPanel {
                         this.show_view_definition(&table_for_def, window, cx);
                     }))
                     .child("DEF"),
+            );
+        }
+
+        // REF button for materialized views (refresh)
+        if show_ref_button {
+            row = row.child(
+                div()
+                    .id(ref_id)
+                    .text_xs()
+                    .mr_1()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.refresh_materialized_view(&schema_for_ref, &table_for_ref, window, cx);
+                    }))
+                    .child("REF"),
             );
         }
 
