@@ -102,6 +102,52 @@ impl StorageManager {
             [],
         );
 
+        // Migration: add password column as fallback for keychain
+        let _ = self.conn.execute(
+            "ALTER TABLE connections ADD COLUMN password TEXT DEFAULT ''",
+            [],
+        );
+
         Ok(())
+    }
+
+    /// Store a password for a connection (base64 encoded, not plaintext).
+    pub fn save_password(
+        &self,
+        id: &crate::connection::ConnectionId,
+        password: &str,
+    ) -> Result<(), StorageError> {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(password);
+        self.conn.execute(
+            "UPDATE connections SET password = ?1 WHERE id = ?2",
+            rusqlite::params![encoded, id.0.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve a stored password for a connection (base64 decoded).
+    pub fn load_password(
+        &self,
+        id: &crate::connection::ConnectionId,
+    ) -> Result<Option<String>, StorageError> {
+        use base64::Engine;
+        let result = self.conn.query_row(
+            "SELECT password FROM connections WHERE id = ?1",
+            rusqlite::params![id.0.to_string()],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(encoded) if !encoded.is_empty() => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&encoded)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                Ok(decoded)
+            }
+            Ok(_) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(StorageError::Database(e)),
+        }
     }
 }

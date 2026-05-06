@@ -275,11 +275,13 @@ impl ConnectionPanel {
             let mut updated = profile.clone();
             updated.id = existing_id;
             let _ = self.storage.save_connection(&updated);
+            let _ = self.storage.save_password(&updated.id, &password);
             let _ = self
                 .credential_store
                 .store(&updated.keychain_service_key(), &password);
         } else {
             let _ = self.storage.save_connection(&profile);
+            let _ = self.storage.save_password(&profile.id, &password);
             let _ = self
                 .credential_store
                 .store(&profile.keychain_service_key(), &password);
@@ -293,32 +295,28 @@ impl ConnectionPanel {
         self.connect(profile, password, cx);
     }
 
-    fn connect_saved(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn connect_saved(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.saved_connections.get(index).cloned() else {
             return;
         };
+
+        // Try keychain first, then SQLite fallback
         let key = profile.keychain_service_key();
-        let password = match self.credential_store.retrieve(&key) {
-            Ok(Some(pw)) => {
-                tracing::info!("Retrieved password from keychain for key: {key}");
-                pw
-            }
-            Ok(None) => {
-                tracing::warn!("No password found in keychain for key: {key}");
-                String::new()
-            }
-            Err(e) => {
-                tracing::error!("Keychain error for key {key}: {e}");
-                String::new()
-            }
-        };
+        let password = self
+            .credential_store
+            .retrieve(&key)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                tracing::info!("Keychain miss, trying SQLite fallback for {key}");
+                self.storage.load_password(&profile.id).ok().flatten()
+            })
+            .unwrap_or_default();
 
         if password.is_empty() {
-            // Open form pre-filled for re-authentication
-            self.prefill_form_from_profile(&profile, window, cx);
-            self.show_form = true;
+            tracing::warn!("No password found in keychain or SQLite for {key}");
             self.error_message =
-                Some("Password not found in keychain. Please re-enter.".to_string());
+                Some("No password found. Please edit the connection and re-enter.".to_string());
             cx.notify();
             return;
         }
