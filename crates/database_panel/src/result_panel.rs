@@ -32,12 +32,19 @@ enum ResultState {
     Error(String),
 }
 
-pub struct ResultPanel {
-    focus_handle: FocusHandle,
-    active: bool,
+#[derive(Clone)]
+struct ResultTab {
+    label: String,
     state: ResultState,
     sort_column: Option<usize>,
     sort_ascending: bool,
+}
+
+pub struct ResultPanel {
+    focus_handle: FocusHandle,
+    active: bool,
+    tabs: Vec<ResultTab>,
+    active_tab: usize,
 }
 
 impl ResultPanel {
@@ -45,13 +52,17 @@ impl ResultPanel {
         Self {
             focus_handle: cx.focus_handle(),
             active: false,
-            state: ResultState::Empty,
-            sort_column: None,
-            sort_ascending: true,
+            tabs: vec![ResultTab {
+                label: "Results".to_string(),
+                state: ResultState::Empty,
+                sort_column: None,
+                sort_ascending: true,
+            }],
+            active_tab: 0,
         }
     }
 
-    /// Execute a SQL query using the given session and display results.
+    /// Execute a SQL query using the given session and display results in a new tab.
     pub fn execute_query(
         &mut self,
         sql: String,
@@ -59,11 +70,17 @@ impl ResultPanel {
         runtime: Arc<Runtime>,
         cx: &mut Context<Self>,
     ) {
-        self.state = ResultState::Loading;
-        self.sort_column = None;
-        self.sort_ascending = true;
+        let label: String = sql.chars().take(30).collect();
+        self.tabs.push(ResultTab {
+            label,
+            state: ResultState::Loading,
+            sort_column: None,
+            sort_ascending: true,
+        });
+        self.active_tab = self.tabs.len() - 1;
         cx.notify();
 
+        let tab_idx = self.active_tab;
         let started = std::time::Instant::now();
 
         cx.spawn(async move |this, cx| {
@@ -74,19 +91,21 @@ impl ResultPanel {
             let elapsed = started.elapsed().as_millis();
 
             this.update(cx, |panel, cx| {
-                match result {
-                    Ok(Ok(result_set)) => {
-                        panel.state = ResultState::Success {
-                            columns: result_set.columns,
-                            rows: result_set.rows,
-                            duration_ms: elapsed,
-                        };
-                    }
-                    Ok(Err(e)) => {
-                        panel.state = ResultState::Error(e.to_string());
-                    }
-                    Err(e) => {
-                        panel.state = ResultState::Error(format!("runtime error: {e}"));
+                if let Some(tab) = panel.tabs.get_mut(tab_idx) {
+                    match result {
+                        Ok(Ok(result_set)) => {
+                            tab.state = ResultState::Success {
+                                columns: result_set.columns,
+                                rows: result_set.rows,
+                                duration_ms: elapsed,
+                            };
+                        }
+                        Ok(Err(e)) => {
+                            tab.state = ResultState::Error(e.to_string());
+                        }
+                        Err(e) => {
+                            tab.state = ResultState::Error(format!("runtime error: {e}"));
+                        }
                     }
                 }
                 cx.notify();
@@ -103,19 +122,29 @@ impl ResultPanel {
         rows: Vec<Vec<CellValue>>,
         cx: &mut Context<Self>,
     ) {
-        self.state = ResultState::Success {
-            columns,
-            rows,
-            duration_ms: 0,
-        };
-        self.sort_column = None;
-        self.sort_ascending = true;
+        self.tabs.push(ResultTab {
+            label: "Results".to_string(),
+            state: ResultState::Success {
+                columns,
+                rows,
+                duration_ms: 0,
+            },
+            sort_column: None,
+            sort_ascending: true,
+        });
+        self.active_tab = self.tabs.len() - 1;
         cx.notify();
     }
 
     /// Display DDL text in the result panel.
     pub fn show_ddl(&mut self, ddl: String, cx: &mut Context<Self>) {
-        self.state = ResultState::Ddl(ddl);
+        self.tabs.push(ResultTab {
+            label: "DDL".to_string(),
+            state: ResultState::Ddl(ddl),
+            sort_column: None,
+            sort_ascending: true,
+        });
+        self.active_tab = self.tabs.len() - 1;
         cx.notify();
     }
 
@@ -127,8 +156,16 @@ impl ResultPanel {
         runtime: Arc<Runtime>,
         cx: &mut Context<Self>,
     ) {
-        self.state = ResultState::Loading;
+        self.tabs.push(ResultTab {
+            label: "Explain".to_string(),
+            state: ResultState::Loading,
+            sort_column: None,
+            sort_ascending: true,
+        });
+        self.active_tab = self.tabs.len() - 1;
         cx.notify();
+
+        let tab_idx = self.active_tab;
 
         cx.spawn(async move |this, cx| {
             let result = runtime
@@ -136,24 +173,26 @@ impl ResultPanel {
                 .await;
 
             this.update(cx, |panel, cx| {
-                match result {
-                    Ok(Ok(result_set)) => {
-                        // The JSON plan is in the first column of the first row
-                        let plan_text = result_set
-                            .rows
-                            .first()
-                            .and_then(|row| row.first())
-                            .map(|cell| cell.display())
-                            .unwrap_or_else(|| "No plan available".to_string());
+                if let Some(tab) = panel.tabs.get_mut(tab_idx) {
+                    match result {
+                        Ok(Ok(result_set)) => {
+                            // The JSON plan is in the first column of the first row
+                            let plan_text = result_set
+                                .rows
+                                .first()
+                                .and_then(|row| row.first())
+                                .map(|cell| cell.display())
+                                .unwrap_or_else(|| "No plan available".to_string());
 
-                        let formatted = format_explain_plan(&plan_text);
-                        panel.state = ResultState::Explain(formatted);
-                    }
-                    Ok(Err(e)) => {
-                        panel.state = ResultState::Error(e.to_string());
-                    }
-                    Err(e) => {
-                        panel.state = ResultState::Error(format!("runtime error: {e}"));
+                            let formatted = format_explain_plan(&plan_text);
+                            tab.state = ResultState::Explain(formatted);
+                        }
+                        Ok(Err(e)) => {
+                            tab.state = ResultState::Error(e.to_string());
+                        }
+                        Err(e) => {
+                            tab.state = ResultState::Error(format!("runtime error: {e}"));
+                        }
                     }
                 }
                 cx.notify();
@@ -163,9 +202,26 @@ impl ResultPanel {
         .detach();
     }
 
+    /// Get the active tab's state.
+    fn active_state(&self) -> &ResultState {
+        &self.tabs[self.active_tab].state
+    }
+
+    /// Close a tab by index.
+    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.tabs.remove(index);
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+        cx.notify();
+    }
+
     /// Export current result set as CSV to clipboard.
     fn export_csv(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = &self.state else {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
             return;
         };
 
@@ -198,7 +254,7 @@ impl ResultPanel {
 
     /// Export current result set as JSON to clipboard.
     fn export_json(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = &self.state else {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
             return;
         };
 
@@ -227,7 +283,7 @@ impl ResultPanel {
 
     /// Export current result set as INSERT statements to clipboard.
     fn export_insert(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = &self.state else {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
             return;
         };
 
@@ -274,10 +330,11 @@ impl ResultPanel {
     /// Return rows sorted by the currently selected column, or in original
     /// order when no sort column is active.
     fn sorted_rows(&self, rows: &[Vec<CellValue>]) -> Vec<Vec<CellValue>> {
-        let Some(col_idx) = self.sort_column else {
+        let tab = &self.tabs[self.active_tab];
+        let Some(col_idx) = tab.sort_column else {
             return rows.to_vec();
         };
-        let ascending = self.sort_ascending;
+        let ascending = tab.sort_ascending;
         let mut sorted = rows.to_vec();
         sorted.sort_by(|a, b| {
             let cell_a = a.get(col_idx).map(|c| c.display()).unwrap_or_default();
@@ -298,7 +355,7 @@ impl ResultPanel {
 
     /// Copy all visible results as tab-separated values to the clipboard.
     fn copy_results_tsv(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = &self.state else {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
             return;
         };
 
@@ -326,6 +383,63 @@ impl ResultPanel {
         }
 
         cx.write_to_clipboard(ClipboardItem::new_string(tsv));
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(28.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().tab_bar_background)
+            .overflow_hidden()
+            .children(self.tabs.iter().enumerate().map(|(i, tab)| {
+                let is_active = i == self.active_tab;
+                let bg = if is_active {
+                    cx.theme().colors().tab_active_background
+                } else {
+                    cx.theme().colors().tab_inactive_background
+                };
+                let text_color = if is_active {
+                    cx.theme().colors().text
+                } else {
+                    cx.theme().colors().text_muted
+                };
+                let close_color = cx.theme().colors().text_disabled;
+                let close_hover_color = cx.theme().colors().text;
+                let idx = i;
+
+                div()
+                    .id(SharedString::from(format!("result-tab-{i}")))
+                    .h_full()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .bg(bg)
+                    .text_xs()
+                    .text_color(text_color)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.active_tab = idx;
+                        cx.notify();
+                    }))
+                    .child(tab.label.clone())
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("close-result-tab-{i}")))
+                            .text_xs()
+                            .text_color(close_color)
+                            .hover(|s| s.text_color(close_hover_color))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.close_tab(idx, cx);
+                            }))
+                            .child("x"),
+                    )
+            }))
     }
 
     fn render_empty(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -429,7 +543,8 @@ impl ResultPanel {
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
                             .on_click(cx.listener(move |this, _, _window, cx| {
-                                if let ResultState::Ddl(ref ddl) = this.state {
+                                if let ResultState::Ddl(ref ddl) = this.tabs[this.active_tab].state
+                                {
                                     cx.write_to_clipboard(ClipboardItem::new_string(ddl.clone()));
                                 }
                             })),
@@ -585,11 +700,14 @@ impl ResultPanel {
                 .child("#"),
         );
 
+        let active_sort_column = self.tabs[self.active_tab].sort_column;
+        let active_sort_ascending = self.tabs[self.active_tab].sort_ascending;
+
         for (i, col) in columns.iter().enumerate() {
             let col_idx = i;
-            let is_sorted = self.sort_column == Some(i);
+            let is_sorted = active_sort_column == Some(i);
             let sort_indicator = if is_sorted {
-                if self.sort_ascending { " ^" } else { " v" }
+                if active_sort_ascending { " ^" } else { " v" }
             } else {
                 ""
             };
@@ -607,11 +725,12 @@ impl ResultPanel {
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover_bg))
                     .on_click(cx.listener(move |this, _, _window, cx| {
-                        if this.sort_column == Some(col_idx) {
-                            this.sort_ascending = !this.sort_ascending;
+                        let tab = &mut this.tabs[this.active_tab];
+                        if tab.sort_column == Some(col_idx) {
+                            tab.sort_ascending = !tab.sort_ascending;
                         } else {
-                            this.sort_column = Some(col_idx);
-                            this.sort_ascending = true;
+                            tab.sort_column = Some(col_idx);
+                            tab.sort_ascending = true;
                         }
                         cx.notify();
                     }))
@@ -697,6 +816,11 @@ impl ResultPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let row_word = if row_count == 1 { "row" } else { "rows" };
+        let tab_info = format!(
+            "Fetched {row_count} {row_word} in {duration_ms}ms | Tab {} of {}",
+            self.active_tab + 1,
+            self.tabs.len()
+        );
         div()
             .flex()
             .flex_row()
@@ -711,7 +835,7 @@ impl ResultPanel {
                     .flex_1()
                     .text_xs()
                     .text_color(cx.theme().colors().text_muted)
-                    .child(format!("{row_count} {row_word} in {duration_ms}ms")),
+                    .child(tab_info),
             )
             .child(
                 div()
@@ -751,7 +875,7 @@ impl EventEmitter<PanelEvent> for ResultPanel {}
 impl Render for ResultPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Clone state data needed for rendering to avoid borrow issues
-        let state = self.state.clone();
+        let state = self.tabs[self.active_tab].state.clone();
         let content = match state {
             ResultState::Empty => self.render_empty(cx).into_any_element(),
             ResultState::Loading => self.render_loading(cx).into_any_element(),
@@ -767,17 +891,30 @@ impl Render for ResultPanel {
                 .into_any_element(),
         };
 
-        div()
+        let tab_bar: Option<AnyElement> = if self.tabs.len() > 1 {
+            Some(self.render_tab_bar(cx).into_any_element())
+        } else {
+            None
+        };
+
+        let mut panel = div()
             .id("result-panel")
             .track_focus(&self.focus_handle)
             .size_full()
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key == "c" && event.keystroke.modifiers.platform {
                     this.copy_results_tsv(cx);
                 }
-            }))
-            .child(content)
+            }));
+
+        if let Some(bar) = tab_bar {
+            panel = panel.child(bar);
+        }
+
+        panel.child(content)
     }
 }
 

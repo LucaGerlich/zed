@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::runtime::Runtime;
 use tokio_postgres::NoTls;
 
-use pgblade_core::connection::ConnectionProfile;
+use pgblade_core::connection::{ConnectionProfile, SslMode};
 use pgblade_core::driver::DatabaseDriver;
 use pgblade_core::error::ConnectionError;
 
@@ -30,13 +30,19 @@ impl PostgresDriver {
     /// Values are single-quoted and any embedded single quotes are escaped
     /// with a backslash to prevent injection.
     fn build_connection_string(profile: &ConnectionProfile, password: &str) -> String {
+        let ssl = match profile.ssl_mode {
+            SslMode::Disable => "disable",
+            SslMode::Prefer => "prefer",
+            SslMode::Require => "require",
+        };
         format!(
-            "host='{}' port={} dbname='{}' user='{}' password='{}'",
+            "host='{}' port={} dbname='{}' user='{}' password='{}' sslmode={}",
             profile.host.replace('\'', "\\'"),
             profile.port,
             profile.database.replace('\'', "\\'"),
             profile.username.replace('\'', "\\'"),
             password.replace('\'', "\\'"),
+            ssl,
         )
     }
 }

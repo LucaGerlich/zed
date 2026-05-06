@@ -19,7 +19,8 @@ actions!(
         FormatSql,
         ViewHistory,
         Disconnect,
-        KillBackend
+        KillBackend,
+        SearchObjects
     ]
 );
 
@@ -64,6 +65,11 @@ pub fn init(cx: &mut App) {
             // Register the KillBackend action on the workspace
             workspace.register_action(|workspace, _: &KillBackend, window, cx| {
                 kill_backend_action(workspace, window, cx);
+            });
+
+            // Register the SearchObjects action on the workspace
+            workspace.register_action(|workspace, _: &SearchObjects, window, cx| {
+                search_objects_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -322,6 +328,51 @@ fn execute_system_query(
     result_panel.update(cx, |panel, cx| {
         panel.execute_query(sql.to_string(), session, runtime, cx);
     });
+}
+
+/// Search database objects (tables, columns, functions) matching the selected text.
+fn search_objects_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(search_term) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let term = search_term.trim();
+    if term.is_empty() {
+        return;
+    }
+
+    // Sanitize the search term to prevent SQL injection
+    let safe_term = term
+        .replace('\'', "''")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+
+    let sql = format!(
+        "SELECT 'TABLE' as type, table_schema as schema, table_name as name, '' as detail \
+         FROM information_schema.tables \
+         WHERE table_name ILIKE '%{safe_term}%' AND table_schema NOT IN ('pg_catalog', 'information_schema') \
+         UNION ALL \
+         SELECT 'COLUMN', table_schema, table_name || '.' || column_name, data_type \
+         FROM information_schema.columns \
+         WHERE column_name ILIKE '%{safe_term}%' AND table_schema NOT IN ('pg_catalog', 'information_schema') \
+         UNION ALL \
+         SELECT 'FUNCTION', n.nspname, p.proname, pg_get_function_result(p.oid) \
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE p.proname ILIKE '%{safe_term}%' AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+         ORDER BY type, name \
+         LIMIT 50"
+    );
+
+    execute_system_query(workspace, &sql, window, cx);
 }
 
 /// Terminate a PostgreSQL backend by PID. Reads the PID from the active editor selection.

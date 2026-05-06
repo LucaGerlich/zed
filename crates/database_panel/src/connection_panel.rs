@@ -9,7 +9,7 @@ use ui::{Button, ButtonStyle, IconName};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use pgblade_core::connection::{ConnectionProfile, Environment, SshAuth, SshConfig};
+use pgblade_core::connection::{ConnectionProfile, Environment, SshAuth, SshConfig, SslMode};
 use pgblade_core::driver::{DatabaseDriver, DatabaseSession};
 use pgblade_core::schema::{SchemaTree, TableEntry, TableKind};
 use pgblade_core::security::CredentialStore;
@@ -40,6 +40,7 @@ pub struct ConnectionPanel {
     username_editor: Entity<Editor>,
     password_editor: Entity<Editor>,
     form_environment: Environment,
+    form_ssl_mode: SslMode,
     // SSH tunnel form fields
     ssh_enabled: bool,
     ssh_host_editor: Entity<Editor>,
@@ -157,6 +158,7 @@ impl ConnectionPanel {
             username_editor,
             password_editor,
             form_environment: Environment::Local,
+            form_ssl_mode: SslMode::Disable,
             ssh_enabled: false,
             ssh_host_editor,
             ssh_port_editor,
@@ -197,6 +199,7 @@ impl ConnectionPanel {
                 editor.set_text("", window, cx);
             });
             self.form_environment = Environment::Local;
+            self.form_ssl_mode = SslMode::Disable;
 
             // Reset SSH fields
             self.ssh_enabled = false;
@@ -251,7 +254,7 @@ impl ConnectionPanel {
             database,
             username,
             environment: self.form_environment,
-            ssl_mode: pgblade_core::connection::SslMode::Disable,
+            ssl_mode: self.form_ssl_mode,
             read_only_default: self.form_environment.is_production(),
             ssh,
         };
@@ -1476,6 +1479,54 @@ impl ConnectionPanel {
             .child(row)
     }
 
+    fn render_ssl_mode_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let modes = [
+            (SslMode::Disable, "Disable"),
+            (SslMode::Prefer, "Prefer"),
+            (SslMode::Require, "Require"),
+        ];
+
+        let mut row = div().flex().flex_row().gap_1();
+
+        for (mode, label) in modes {
+            let is_selected = self.form_ssl_mode == mode;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("ssl-{label}")))
+                    .px_2()
+                    .py(px(2.))
+                    .text_xs()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .when(is_selected, |s| {
+                        s.bg(cx.theme().colors().element_active)
+                            .text_color(cx.theme().colors().text)
+                    })
+                    .when(!is_selected, |s| {
+                        s.text_color(cx.theme().colors().text_muted)
+                            .hover(|s| s.bg(cx.theme().colors().element_active))
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.form_ssl_mode = mode;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child("SSL Mode"),
+            )
+            .child(row)
+    }
+
     fn render_ssh_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ssh_enabled = self.ssh_enabled;
         let ssh_auth = self.ssh_auth.clone();
@@ -1613,6 +1664,7 @@ impl ConnectionPanel {
             .child(self.render_editor_field("Username", &self.username_editor, cx))
             .child(self.render_editor_field("Password", &self.password_editor, cx))
             .child(self.render_environment_selector(cx))
+            .child(self.render_ssl_mode_selector(cx))
             .child(self.render_ssh_section(cx))
             .child(
                 div()
