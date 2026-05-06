@@ -6,8 +6,8 @@ use gpui::*;
 use tokio::runtime::Runtime;
 use ui::prelude::*;
 use ui::{
-    Button, ButtonStyle, IconButton, IconName, IconSize, Label, LabelCommon, LabelSize, ListItem,
-    ListItemSpacing, Tooltip,
+    Button, ButtonStyle, ContextMenu, IconButton, IconName, IconSize, Label, LabelCommon,
+    LabelSize, ListItem, ListItemSpacing, Tooltip, right_click_menu,
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -68,6 +68,8 @@ pub struct ConnectionPanel {
     workspace: WeakEntity<Workspace>,
     // Error message to display in the panel
     error_message: Option<String>,
+    // When editing an existing connection, holds the original ID
+    editing_connection_id: Option<pgblade_core::connection::ConnectionId>,
 }
 
 impl ConnectionPanel {
@@ -179,12 +181,15 @@ impl ConnectionPanel {
             expanded_nodes: HashSet::new(),
             workspace,
             error_message: None,
+            editing_connection_id: None,
         }
     }
 
     fn toggle_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_form = !self.show_form;
         if self.show_form {
+            // Clear editing state for a fresh new connection form
+            self.editing_connection_id = None;
             // Reset editors to defaults
             self.host_editor.update(cx, |editor, cx| {
                 editor.set_text("localhost", window, cx);
@@ -249,8 +254,11 @@ impl ConnectionPanel {
             SshConfig::default()
         };
 
+        // Reuse the editing ID if editing an existing connection, otherwise generate new
+        let connection_id = self.editing_connection_id.take().unwrap_or_default();
+
         let profile = ConnectionProfile {
-            id: pgblade_core::connection::ConnectionId::new(),
+            id: connection_id,
             name: format!("{}@{}", database, host),
             host,
             port: port_str.parse().unwrap_or(5432),
@@ -285,17 +293,83 @@ impl ConnectionPanel {
         self.connect(profile, password, cx);
     }
 
-    fn connect_saved(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn connect_saved(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self.saved_connections.get(index).cloned() else {
             return;
         };
-        let password = self
-            .credential_store
-            .retrieve(&profile.keychain_service_key())
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let key = profile.keychain_service_key();
+        let password = match self.credential_store.retrieve(&key) {
+            Ok(Some(pw)) => {
+                tracing::info!("Retrieved password from keychain for key: {key}");
+                pw
+            }
+            Ok(None) => {
+                tracing::warn!("No password found in keychain for key: {key}");
+                String::new()
+            }
+            Err(e) => {
+                tracing::error!("Keychain error for key {key}: {e}");
+                String::new()
+            }
+        };
+
+        if password.is_empty() {
+            // Open form pre-filled for re-authentication
+            self.prefill_form_from_profile(&profile, window, cx);
+            self.show_form = true;
+            self.error_message =
+                Some("Password not found in keychain. Please re-enter.".to_string());
+            cx.notify();
+            return;
+        }
+
         self.connect(profile, password, cx);
+    }
+
+    fn prefill_form_from_profile(
+        &mut self,
+        profile: &ConnectionProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editing_connection_id = Some(profile.id);
+        let host = profile.host.clone();
+        let port = profile.port.to_string();
+        let database = profile.database.clone();
+        let username = profile.username.clone();
+        self.host_editor
+            .update(cx, |e, cx| e.set_text(host, window, cx));
+        self.port_editor
+            .update(cx, |e, cx| e.set_text(port, window, cx));
+        self.database_editor
+            .update(cx, |e, cx| e.set_text(database, window, cx));
+        self.username_editor
+            .update(cx, |e, cx| e.set_text(username, window, cx));
+        self.password_editor
+            .update(cx, |e, cx| e.set_text("", window, cx));
+        self.form_environment = profile.environment;
+        self.form_ssl_mode = profile.ssl_mode;
+
+        if profile.ssh.enabled {
+            self.ssh_enabled = true;
+            let ssh_host = profile.ssh.host.clone();
+            let ssh_port = profile.ssh.port.to_string();
+            let ssh_username = profile.ssh.username.clone();
+            self.ssh_host_editor
+                .update(cx, |e, cx| e.set_text(ssh_host, window, cx));
+            self.ssh_port_editor
+                .update(cx, |e, cx| e.set_text(ssh_port, window, cx));
+            self.ssh_username_editor
+                .update(cx, |e, cx| e.set_text(ssh_username, window, cx));
+            self.ssh_auth = profile.ssh.auth.clone();
+            if let SshAuth::KeyFile { ref path } = profile.ssh.auth {
+                let key_path = path.clone();
+                self.ssh_key_editor
+                    .update(cx, |e, cx| e.set_text(key_path, window, cx));
+            }
+        } else {
+            self.ssh_enabled = false;
+        }
     }
 
     fn connect(
@@ -1309,26 +1383,28 @@ impl ConnectionPanel {
             .toggle(Some(is_expanded))
             .on_toggle(cx.listener({
                 let node_id = node_id_owned.clone();
-                let schema = schema_owned.clone();
-                let table = table_owned.clone();
-                move |this, _, window, cx| {
+                move |this, _, _window, cx| {
                     if this.expanded_nodes.contains(&node_id) {
                         this.expanded_nodes.remove(&node_id);
                     } else {
                         this.expanded_nodes.insert(node_id.clone());
                     }
                     cx.notify();
-                    this.preview_table(&schema, &table, window, cx);
                 }
             }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if this.expanded_nodes.contains(&node_id_owned) {
-                    this.expanded_nodes.remove(&node_id_owned);
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if event.click_count() >= 2 {
+                    // Double-click: preview table data
+                    this.preview_table(&schema_owned, &table_owned, window, cx);
                 } else {
-                    this.expanded_nodes.insert(node_id_owned.clone());
+                    // Single-click: expand/collapse
+                    if this.expanded_nodes.contains(&node_id_owned) {
+                        this.expanded_nodes.remove(&node_id_owned);
+                    } else {
+                        this.expanded_nodes.insert(node_id_owned.clone());
+                    }
+                    cx.notify();
                 }
-                cx.notify();
-                this.preview_table(&schema_owned, &table_owned, window, cx);
             }))
             .end_slot_on_hover(hover_actions)
             .child(
@@ -1787,67 +1863,107 @@ impl ConnectionPanel {
             };
             let idx = i;
             let connect_idx = i;
+            let edit_idx = i;
 
-            list = list.child(
-                ListItem::new(SharedString::from(format!("conn-{i}")))
-                    .spacing(ListItemSpacing::Dense)
-                    .inset(true)
-                    .start_slot(
-                        div()
-                            .w(px(8.))
-                            .h(px(8.))
-                            .rounded_full()
-                            .bg(env_color)
-                            .flex_shrink_0(),
-                    )
-                    .end_slot_on_hover(
-                        IconButton::new(
-                            SharedString::from(format!("del-conn-{i}")),
-                            IconName::Trash,
-                        )
+            let connection_row = ListItem::new(SharedString::from(format!("conn-{i}")))
+                .spacing(ListItemSpacing::Dense)
+                .inset(true)
+                .start_slot(
+                    div()
+                        .w(px(8.))
+                        .h(px(8.))
+                        .rounded_full()
+                        .bg(env_color)
+                        .flex_shrink_0(),
+                )
+                .end_slot_on_hover(
+                    IconButton::new(SharedString::from(format!("del-conn-{i}")), IconName::Trash)
                         .icon_size(IconSize::XSmall)
                         .icon_color(Color::Error)
                         .style(ButtonStyle::Subtle)
                         .tooltip(Tooltip::text("Delete Connection"))
-                        .on_click(cx.listener(
-                            move |this, _, _window, cx| {
-                                this.delete_connection(idx, cx);
-                            },
-                        )),
-                    )
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.connect_saved(connect_idx, cx);
-                    }))
-                    .child(
-                        v_flex()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(Label::new(name).size(LabelSize::Small))
-                                    .child({
-                                        let badge_bg: Hsla = env_color.into();
-                                        let faded_bg = Hsla {
-                                            a: 0.15,
-                                            ..badge_bg
-                                        };
-                                        div()
-                                            .px(px(4.))
-                                            .py(px(1.))
-                                            .rounded(px(3.))
-                                            .bg(faded_bg)
-                                            .child(
-                                                Label::new(env_label)
-                                                    .size(LabelSize::XSmall)
-                                                    .color(Color::Muted),
-                                            )
-                                    }),
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.delete_connection(idx, cx);
+                        })),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.connect_saved(connect_idx, window, cx);
+                }))
+                .child(
+                    v_flex()
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Label::new(name).size(LabelSize::Small))
+                                .child({
+                                    let badge_bg: Hsla = env_color.into();
+                                    let faded_bg = Hsla {
+                                        a: 0.15,
+                                        ..badge_bg
+                                    };
+                                    div()
+                                        .px(px(4.))
+                                        .py(px(1.))
+                                        .rounded(px(3.))
+                                        .bg(faded_bg)
+                                        .child(
+                                            Label::new(env_label)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                }),
+                        )
+                        .child(
+                            Label::new(host_info)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                );
+
+            let panel_handle = cx.entity().downgrade();
+            list = list.child(
+                right_click_menu(SharedString::from(format!("conn-ctx-{i}")))
+                    .trigger(move |_, _, _| connection_row)
+                    .menu(move |window, cx| {
+                        let entity_connect = panel_handle.clone();
+                        let entity_edit = panel_handle.clone();
+                        let entity_delete = panel_handle.clone();
+                        ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                            menu.entry("Connect", None, move |window, cx| {
+                                if let Some(panel) = entity_connect.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.connect_saved(connect_idx, window, cx);
+                                    });
+                                }
+                            })
+                            .entry("Edit Connection", None, move |window, cx| {
+                                if let Some(panel) = entity_edit.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        if let Some(profile) =
+                                            panel.saved_connections.get(edit_idx).cloned()
+                                        {
+                                            panel.prefill_form_from_profile(&profile, window, cx);
+                                            panel.show_form = true;
+                                            panel.error_message = None;
+                                            cx.notify();
+                                        }
+                                    });
+                                }
+                            })
+                            .separator()
+                            .entry(
+                                "Delete Connection",
+                                None,
+                                move |_window, cx| {
+                                    if let Some(panel) = entity_delete.upgrade() {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.delete_connection(idx, cx);
+                                        });
+                                    }
+                                },
                             )
-                            .child(
-                                Label::new(host_info)
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            ),
-                    ),
+                        })
+                    }),
             );
         }
 
@@ -2047,6 +2163,17 @@ impl ConnectionPanel {
     }
 
     fn render_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let form_title = if self.editing_connection_id.is_some() {
+            "Edit Connection"
+        } else {
+            "New Connection"
+        };
+        let save_label = if self.editing_connection_id.is_some() {
+            "Update & Connect"
+        } else {
+            "Save & Connect"
+        };
+
         v_flex()
             .p_2()
             .gap_2()
@@ -2054,7 +2181,7 @@ impl ConnectionPanel {
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().surface_background)
             .child(
-                Label::new("New Connection")
+                Label::new(form_title)
                     .size(LabelSize::Small)
                     .weight(FontWeight::SEMIBOLD),
             )
@@ -2075,11 +2202,13 @@ impl ConnectionPanel {
                             .style(ButtonStyle::Subtle)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.show_form = false;
+                                this.editing_connection_id = None;
+                                this.error_message = None;
                                 cx.notify();
                             })),
                     )
                     .child(
-                        Button::new("save-connect", "Save & Connect")
+                        Button::new("save-connect", save_label)
                             .style(ButtonStyle::Filled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.save_connection(window, cx);
