@@ -54,7 +54,8 @@ actions!(
         AutovacuumStatus,
         ViewForeignTables,
         CreateFunction,
-        CreateTrigger
+        CreateTrigger,
+        ShowShortcuts
     ]
 );
 
@@ -271,13 +272,24 @@ pub fn init(cx: &mut App) {
                 create_trigger_action(workspace, window, cx);
             });
 
+            // Register the ShowShortcuts action on the workspace
+            workspace.register_action(|workspace, _: &ShowShortcuts, window, cx| {
+                show_shortcuts_action(workspace, window, cx);
+            });
+
             if let Some(window) = window {
                 let workspace_weak = cx.weak_entity();
                 let connection = cx.new(|cx| ConnectionPanel::new(workspace_weak, window, cx));
-                workspace.add_panel(connection, window, cx);
+                workspace.add_panel(connection.clone(), window, cx);
 
                 let results = cx.new(ResultPanel::new);
                 workspace.add_panel(results, window, cx);
+
+                // Auto-open the connection panel if there are saved connections
+                let has_saved = connection.read(cx).has_saved_connections();
+                if has_saved {
+                    workspace.open_panel::<ConnectionPanel>(window, cx);
+                }
             }
         },
     )
@@ -1459,6 +1471,46 @@ fn create_function_action(
             let prefix = if text.is_empty() { "" } else { "\n\n" };
             editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
             editor.insert(&format!("{prefix}{template}"), window, cx);
+        });
+    }
+}
+
+/// Display all PgBlade keyboard shortcuts in the result panel.
+fn show_shortcuts_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let shortcuts = "\
+PgBlade Keyboard Shortcuts
+==========================
+
+Query Execution:
+  Cmd+Enter          Execute query (selected text or full buffer)
+  Cmd+Alt+X          EXPLAIN ANALYZE
+  Ctrl+Space         SQL auto-completion
+
+Navigation:
+  Cmd+Shift+P        Command palette (type any action name)
+
+All actions are available in the command palette:
+  Execute Query, Format SQL, View Sessions, Slow Queries,
+  View Locks, Kill Backend, Database Info, Table Sizes,
+  Index Usage, Unused Indexes, Missing Indexes, Table Bloat,
+  Cache Hit Ratio, Vacuum Progress, Autovacuum Status,
+  Connection Stats, WAL Status, View Privileges, View Roles,
+  View Tablespaces, View Replication, View Settings,
+  View Comments, View Extensions, View Definition,
+  View Dependencies, View Partitions, View Foreign Tables,
+  Sequence Values, Column Stats, Compare Schemas,
+  Dump Schema, ER Diagram, Import CSV, View History,
+  Search Objects, Disconnect, Create Function, Create Trigger,
+  Show Shortcuts";
+
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| {
+            panel.show_ddl(shortcuts.to_string(), cx);
         });
     }
 }

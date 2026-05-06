@@ -548,6 +548,11 @@ impl ConnectionPanel {
         .detach();
     }
 
+    /// Returns true if there are saved connections in storage.
+    pub fn has_saved_connections(&self) -> bool {
+        !self.saved_connections.is_empty()
+    }
+
     /// Returns the active database session, if connected.
     pub fn session(&self) -> Option<Arc<dyn DatabaseSession>> {
         self.session.clone()

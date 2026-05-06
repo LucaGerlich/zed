@@ -1013,10 +1013,41 @@ impl ResultPanel {
             )
     }
 
-    fn render_error(&self, message: &str, cx: &Context<Self>) -> impl IntoElement {
+    fn render_error(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = &self.tabs[self.active_tab];
+        let sql_preview = tab.sql.as_ref().map(|s| {
+            let preview: String = s.chars().take(200).collect();
+            if s.len() > 200 {
+                format!("{preview}...")
+            } else {
+                preview
+            }
+        });
+
+        let suggestion = if message.contains("42P01") {
+            Some("Table not found. Check the table name and schema.")
+        } else if message.contains("42703") {
+            Some("Column not found. Check column names.")
+        } else if message.contains("42601") {
+            Some("Syntax error. Check your SQL syntax.")
+        } else if message.contains("28P01") || message.contains("authentication") {
+            Some("Authentication failed. Check username and password.")
+        } else if message.contains("08") {
+            Some("Connection issue. The database may be unreachable.")
+        } else if message.contains("23505") {
+            Some("Unique constraint violation. A duplicate value exists.")
+        } else if message.contains("23503") {
+            Some("Foreign key violation. Referenced record doesn't exist.")
+        } else {
+            None
+        };
+
+        let error_text = message.to_string();
+
         v_flex()
             .size_full()
-            .p_2()
+            .p_3()
+            .gap_2()
             .child(
                 h_flex()
                     .gap_1()
@@ -1027,20 +1058,56 @@ impl ResultPanel {
                     )
                     .child(
                         Label::new("Query Error")
-                            .size(LabelSize::Small)
+                            .size(LabelSize::Default)
                             .weight(FontWeight::SEMIBOLD)
                             .color(Color::Error),
                     ),
             )
             .child(
                 div()
-                    .mt_2()
                     .p_2()
                     .rounded_sm()
                     .bg(cx.theme().colors().surface_background)
                     .border_1()
                     .border_color(cx.theme().colors().border)
-                    .child(Label::new(message.to_string()).size(LabelSize::XSmall)),
+                    .child(
+                        Label::new(message.to_string())
+                            .size(LabelSize::Small)
+                            .color(Color::Default),
+                    ),
+            )
+            .children(suggestion.map(|s| {
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::Info)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(s).size(LabelSize::XSmall).color(Color::Muted))
+            }))
+            .children(sql_preview.map(|sql| {
+                div()
+                    .mt_1()
+                    .p_2()
+                    .rounded_sm()
+                    .bg(cx.theme().colors().editor_background)
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(Label::new(sql).size(LabelSize::XSmall).color(Color::Muted))
+            }))
+            .child(
+                h_flex().mt_1().child(
+                    Button::new("copy-error", "Copy Error")
+                        .style(ButtonStyle::Subtle)
+                        .label_size(LabelSize::XSmall)
+                        .on_click({
+                            let err = error_text.clone();
+                            cx.listener(move |_this, _, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(err.clone()));
+                            })
+                        }),
+                ),
             )
     }
 
