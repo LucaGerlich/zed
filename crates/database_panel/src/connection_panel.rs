@@ -1848,6 +1848,106 @@ impl ConnectionPanel {
         div().flex().flex_col().children(rows)
     }
 
+    /// Render a compact toolbar with quick action icon buttons for common database tasks.
+    /// Shown when connected, between the connection info bar and the schema tree.
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .flex_wrap()
+            .child(
+                IconButton::new("tb-sessions", IconName::Person)
+                    .icon_size(IconSize::XSmall)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("Active Sessions"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.execute_in_result_panel(
+                            "SELECT pid, usename AS user_name, datname AS database, state, \
+                             CASE WHEN state = 'active' THEN (now() - query_start)::text ELSE '' END AS duration, \
+                             LEFT(query, 200) AS query \
+                             FROM pg_stat_activity WHERE datname IS NOT NULL ORDER BY state DESC, query_start",
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                IconButton::new("tb-locks", IconName::LockOutlined)
+                    .icon_size(IconSize::XSmall)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("View Locks"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.execute_in_result_panel(
+                            "SELECT blocked_locks.pid AS blocked_pid, \
+                             LEFT(blocked_activity.query, 100) AS blocked_query, \
+                             blocking_locks.pid AS blocking_pid, \
+                             LEFT(blocking_activity.query, 100) AS blocking_query \
+                             FROM pg_catalog.pg_locks blocked_locks \
+                             JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid \
+                             JOIN pg_catalog.pg_locks blocking_locks ON blocking_locks.locktype = blocked_locks.locktype \
+                                 AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database \
+                                 AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation \
+                                 AND blocking_locks.pid != blocked_locks.pid \
+                             JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid \
+                             WHERE NOT blocked_locks.granted",
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                IconButton::new("tb-sizes", IconName::DatabaseZap)
+                    .icon_size(IconSize::XSmall)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("Table Sizes"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.execute_in_result_panel(
+                            "SELECT schemaname || '.' || tablename AS table_name, \
+                             pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size, \
+                             (SELECT reltuples::bigint FROM pg_class WHERE relname = tablename) AS est_rows \
+                             FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+                             ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC LIMIT 20",
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                IconButton::new("tb-slow", IconName::Clock)
+                    .icon_size(IconSize::XSmall)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("Slow Queries"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.execute_in_result_panel(
+                            "SELECT pid, now() - query_start AS duration, usename, LEFT(query, 200) AS query \
+                             FROM pg_stat_activity WHERE state != 'idle' AND query NOT ILIKE '%pg_stat_activity%' \
+                             ORDER BY duration DESC LIMIT 10",
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                IconButton::new("tb-bloat", IconName::Flame)
+                    .icon_size(IconSize::XSmall)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("Table Bloat"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.execute_in_result_panel(
+                            "SELECT schemaname || '.' || tablename AS table_name, \
+                             n_dead_tup AS dead_rows, n_live_tup AS live_rows, \
+                             CASE WHEN n_live_tup > 0 THEN round(100.0 * n_dead_tup / n_live_tup, 1) ELSE 0 END AS bloat_pct \
+                             FROM pg_stat_user_tables WHERE n_dead_tup > 100 ORDER BY n_dead_tup DESC LIMIT 10",
+                            window,
+                            cx,
+                        );
+                    })),
+            )
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let header = h_flex()
             .items_center()
@@ -2443,7 +2543,8 @@ impl Render for ConnectionPanel {
         if self.show_form {
             panel = panel.child(self.render_form(cx));
         } else if self.schema_tree.is_some() {
-            // Connected with schema loaded — show tree
+            // Connected with schema loaded — show toolbar + tree
+            panel = panel.child(self.render_toolbar(cx));
             panel = panel.child(
                 div()
                     .id("schema-tree-container")
@@ -2453,7 +2554,8 @@ impl Render for ConnectionPanel {
                     .child(self.render_schema_tree(cx)),
             );
         } else if self.session.is_some() {
-            // Connected but schema still loading
+            // Connected but schema still loading — show toolbar
+            panel = panel.child(self.render_toolbar(cx));
             panel = panel.child(
                 div()
                     .p_2()

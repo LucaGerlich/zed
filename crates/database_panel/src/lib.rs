@@ -1577,6 +1577,7 @@ Query Execution:
   Ctrl+Space         SQL auto-completion
 
 Navigation:
+  Ctrl+Shift+D       Toggle Database Panel
   Cmd+Shift+P        Command palette (type any action name)
 
 All actions are available in the command palette:

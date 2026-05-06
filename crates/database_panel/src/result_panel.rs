@@ -22,7 +22,6 @@ pub fn register(workspace: &mut Workspace) {
 
 #[derive(Clone)]
 enum ResultState {
-    Empty,
     Loading,
     Success {
         columns: Vec<ColumnMeta>,
@@ -68,18 +67,7 @@ impl ResultPanel {
         Self {
             focus_handle: cx.focus_handle(),
             active: false,
-            tabs: vec![ResultTab {
-                label: "Results".to_string(),
-                state: ResultState::Empty,
-                sort_column: None,
-                sort_ascending: true,
-                source_table: None,
-                sql: None,
-                session: None,
-                runtime: None,
-                row_limit: 500,
-                has_more: false,
-            }],
+            tabs: Vec::new(),
             active_tab: 0,
             selected_row: None,
         }
@@ -105,14 +93,7 @@ impl ResultPanel {
         source_table: Option<(String, String)>,
         cx: &mut Context<Self>,
     ) {
-        let label: String = {
-            let preview: String = sql.trim().chars().take(40).collect();
-            if preview.is_empty() {
-                "Query".to_string()
-            } else {
-                preview
-            }
-        };
+        let label = Self::smart_label(&sql);
         self.selected_row = None;
         let row_limit = 500usize;
         self.tabs.push(ResultTab {
@@ -290,20 +271,55 @@ impl ResultPanel {
         .detach();
     }
 
+    /// Generate a concise, meaningful tab label from a SQL statement.
+    fn smart_label(sql: &str) -> String {
+        let trimmed = sql.trim();
+        let upper = trimmed.to_uppercase();
+
+        if upper.starts_with("SELECT") {
+            // Try to extract table name after FROM
+            if let Some(from_pos) = upper.find(" FROM ") {
+                let after_from = &trimmed[from_pos + 6..];
+                let table: String = after_from
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("?")
+                    .trim_matches('"')
+                    .to_string();
+                return format!("SELECT {table}");
+            }
+            return "SELECT".to_string();
+        }
+        if upper.starts_with("INSERT") {
+            return "INSERT".to_string();
+        }
+        if upper.starts_with("UPDATE") {
+            return "UPDATE".to_string();
+        }
+        if upper.starts_with("DELETE") {
+            return "DELETE".to_string();
+        }
+        if upper.starts_with("EXPLAIN") {
+            return "EXPLAIN".to_string();
+        }
+        if upper.starts_with("CREATE") {
+            return "CREATE".to_string();
+        }
+
+        trimmed.chars().take(25).collect()
+    }
+
     /// Get the active tab's state.
     fn active_state(&self) -> &ResultState {
         &self.tabs[self.active_tab].state
     }
 
-    /// Close a tab by index.
+    /// Close a tab by index. Allows closing the last tab (returns to empty state).
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.tabs.len() <= 1 {
-            return;
-        }
         self.tabs.remove(index);
         self.selected_row = None;
         if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len() - 1;
+            self.active_tab = self.tabs.len().saturating_sub(1);
         }
         cx.notify();
     }
@@ -513,18 +529,6 @@ impl ResultPanel {
     fn clear_all(&mut self, cx: &mut Context<Self>) {
         self.tabs.clear();
         self.selected_row = None;
-        self.tabs.push(ResultTab {
-            label: "Results".to_string(),
-            state: ResultState::Empty,
-            sort_column: None,
-            sort_ascending: true,
-            source_table: None,
-            sql: None,
-            session: None,
-            runtime: None,
-            row_limit: 500,
-            has_more: false,
-        });
         self.active_tab = 0;
         cx.notify();
     }
@@ -867,6 +871,9 @@ impl ResultPanel {
 
     /// Copy all visible results as tab-separated values to the clipboard.
     fn copy_results_tsv(&self, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
+        }
         let ResultState::Success { columns, rows, .. } = self.active_state() else {
             return;
         };
@@ -1619,29 +1626,6 @@ impl EventEmitter<PanelEvent> for ResultPanel {}
 
 impl Render for ResultPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Clone state data needed for rendering to avoid borrow issues
-        let state = self.tabs[self.active_tab].state.clone();
-        let content = match state {
-            ResultState::Empty => self.render_empty(cx).into_any_element(),
-            ResultState::Loading => self.render_loading(cx).into_any_element(),
-            ResultState::Error(msg) => self.render_error(&msg, cx).into_any_element(),
-            ResultState::Ddl(ddl) => self.render_ddl(&ddl, cx).into_any_element(),
-            ResultState::Explain(plan) => self.render_explain(&plan, cx).into_any_element(),
-            ResultState::Success {
-                columns,
-                rows,
-                duration_ms,
-            } => self
-                .render_results(&columns, &rows, duration_ms, cx)
-                .into_any_element(),
-        };
-
-        let tab_bar: Option<AnyElement> = if self.tabs.len() > 1 {
-            Some(self.render_tab_bar(cx).into_any_element())
-        } else {
-            None
-        };
-
         let mut panel = div()
             .id("result-panel")
             .track_focus(&self.focus_handle)
@@ -1655,9 +1639,29 @@ impl Render for ResultPanel {
                 }
             }));
 
-        if let Some(bar) = tab_bar {
-            panel = panel.child(bar);
+        // Handle empty state (no tabs)
+        if self.tabs.is_empty() {
+            return panel.child(self.render_empty(cx));
         }
+
+        // Tab bar shown when there are tabs (always, so close button is accessible)
+        panel = panel.child(self.render_tab_bar(cx));
+
+        // Clone state data needed for rendering to avoid borrow issues
+        let state = self.tabs[self.active_tab].state.clone();
+        let content = match state {
+            ResultState::Loading => self.render_loading(cx).into_any_element(),
+            ResultState::Error(msg) => self.render_error(&msg, cx).into_any_element(),
+            ResultState::Ddl(ddl) => self.render_ddl(&ddl, cx).into_any_element(),
+            ResultState::Explain(plan) => self.render_explain(&plan, cx).into_any_element(),
+            ResultState::Success {
+                columns,
+                rows,
+                duration_ms,
+            } => self
+                .render_results(&columns, &rows, duration_ms, cx)
+                .into_any_element(),
+        };
 
         panel.child(content)
     }
