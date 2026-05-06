@@ -3365,7 +3365,6 @@ impl Editor {
         self.completion_provider = provider;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn completion_provider(&self) -> Option<Rc<dyn CompletionProvider>> {
         self.completion_provider.clone()
     }

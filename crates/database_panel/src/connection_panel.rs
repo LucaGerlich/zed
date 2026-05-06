@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use editor::Editor;
@@ -22,6 +23,7 @@ use pgblade_postgres::PostgresDriver;
 use pgblade_security::KeychainStore;
 
 use crate::ResultPanel;
+use crate::SqlCompletionProvider;
 
 actions!(database_panel, [ToggleFocus, AddConnection]);
 
@@ -72,11 +74,14 @@ pub struct ConnectionPanel {
     editing_connection_id: Option<pgblade_core::connection::ConnectionId>,
     // Timestamp when the current connection was established
     connected_at: Option<std::time::Instant>,
+    // SQL completion provider shared with editors for inline completions
+    sql_completion_provider: Rc<SqlCompletionProvider>,
 }
 
 impl ConnectionPanel {
     pub fn new(
         workspace: WeakEntity<Workspace>,
+        sql_completion_provider: Rc<SqlCompletionProvider>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -185,6 +190,7 @@ impl ConnectionPanel {
             error_message: None,
             editing_connection_id: None,
             connected_at: None,
+            sql_completion_provider,
         }
     }
 
@@ -592,6 +598,8 @@ impl ConnectionPanel {
                                 }
                             }
                         }
+                        let items = crate::sql_completion::build_completion_items(&tree);
+                        panel.sql_completion_provider.set_items(items);
                         panel.schema_tree = Some(tree);
                         cx.notify();
                     })
@@ -664,6 +672,7 @@ impl ConnectionPanel {
         self.error_message = None;
         self.show_form = false;
         self.ssh_enabled = false;
+        self.sql_completion_provider.set_items(Vec::new());
         // Reload saved connections so the list is fresh
         self.saved_connections = self.storage.load_connections().unwrap_or_default();
         tracing::info!(

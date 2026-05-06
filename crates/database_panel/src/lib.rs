@@ -1,6 +1,9 @@
 mod connection_panel;
 mod result_panel;
 mod sql_completion;
+pub mod sql_completion_provider;
+
+use std::rc::Rc;
 
 use editor::Editor;
 use editor::actions::SelectAll;
@@ -10,6 +13,7 @@ use workspace::Workspace;
 
 pub use connection_panel::ConnectionPanel;
 pub use result_panel::ResultPanel;
+pub use sql_completion_provider::SqlCompletionProvider;
 
 actions!(
     database_panel,
@@ -60,8 +64,26 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    let provider = Rc::new(SqlCompletionProvider::new());
+
+    // Observe new editors and install the SQL completion provider as a wrapper
+    // around any existing provider (typically the LSP-based Project provider).
+    let provider_for_editors = provider.clone();
     cx.observe_new(
-        |workspace: &mut Workspace, window: Option<&mut Window>, cx: &mut Context<Workspace>| {
+        move |editor: &mut Editor, _window: Option<&mut Window>, _cx: &mut Context<Editor>| {
+            let existing = editor.completion_provider();
+            let wrapper = provider_for_editors.clone();
+            wrapper.set_inner(existing);
+            editor.set_completion_provider(Some(wrapper as Rc<dyn editor::CompletionProvider>));
+        },
+    )
+    .detach();
+
+    let provider_for_workspace = provider;
+    cx.observe_new(
+        move |workspace: &mut Workspace,
+              window: Option<&mut Window>,
+              cx: &mut Context<Workspace>| {
             connection_panel::register(workspace);
             result_panel::register(workspace);
 
@@ -279,7 +301,9 @@ pub fn init(cx: &mut App) {
 
             if let Some(window) = window {
                 let workspace_weak = cx.weak_entity();
-                let connection = cx.new(|cx| ConnectionPanel::new(workspace_weak, window, cx));
+                let provider_clone = provider_for_workspace.clone();
+                let connection =
+                    cx.new(|cx| ConnectionPanel::new(workspace_weak, provider_clone, window, cx));
                 workspace.add_panel(connection.clone(), window, cx);
 
                 let results = cx.new(ResultPanel::new);
