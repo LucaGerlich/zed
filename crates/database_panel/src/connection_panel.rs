@@ -357,21 +357,20 @@ impl ConnectionPanel {
             return;
         };
 
-        // Try keychain first, then SQLite fallback
-        let key = profile.keychain_service_key();
+        // Try SQLite first (reliable), then keychain as fallback
         let password = self
-            .credential_store
-            .retrieve(&key)
+            .storage
+            .load_password(&profile.id)
             .ok()
             .flatten()
             .or_else(|| {
-                tracing::info!("Keychain miss, trying SQLite fallback for {key}");
-                self.storage.load_password(&profile.id).ok().flatten()
+                let key = profile.keychain_service_key();
+                self.credential_store.retrieve(&key).ok().flatten()
             })
             .unwrap_or_default();
 
         if password.is_empty() {
-            tracing::warn!("No password found in keychain or SQLite for {key}");
+            tracing::warn!("No password found for connection {}", profile.name);
             self.error_message =
                 Some("No password found. Please edit the connection and re-enter.".to_string());
             cx.notify();
@@ -465,6 +464,7 @@ impl ConnectionPanel {
         let driver = self.driver.clone();
         let runtime = self.runtime.clone();
         let connect_profile = profile.clone();
+        let password_for_save = password.clone();
 
         cx.spawn(async move |this, cx| {
             let result = runtime
@@ -476,8 +476,10 @@ impl ConnectionPanel {
                     let session: Arc<dyn DatabaseSession> = Arc::from(session);
                     this.update(cx, |panel, cx| {
                         panel.session = Some(session);
-                        panel.connected_profile = Some(profile);
+                        panel.connected_profile = Some(profile.clone());
                         panel.connected_at = Some(std::time::Instant::now());
+                        // Ensure password is stored in SQLite for next time
+                        let _ = panel.storage.save_password(&profile.id, &password_for_save);
                         tracing::info!("database connection established");
                         cx.emit(PanelEvent::Activate);
                         cx.notify();
