@@ -18,7 +18,8 @@ actions!(
         ExplainAnalyze,
         FormatSql,
         ViewHistory,
-        Disconnect
+        Disconnect,
+        KillBackend
     ]
 );
 
@@ -58,6 +59,11 @@ pub fn init(cx: &mut App) {
                 if let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) {
                     conn_panel.update(cx, |panel, cx| panel.disconnect(cx));
                 }
+            });
+
+            // Register the KillBackend action on the workspace
+            workspace.register_action(|workspace, _: &KillBackend, window, cx| {
+                kill_backend_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -316,4 +322,31 @@ fn execute_system_query(
     result_panel.update(cx, |panel, cx| {
         panel.execute_query(sql.to_string(), session, runtime, cx);
     });
+}
+
+/// Terminate a PostgreSQL backend by PID. Reads the PID from the active editor selection.
+fn kill_backend_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        tracing::warn!("KillBackend: no text selected");
+        return;
+    };
+    let pid = selected.trim();
+
+    if pid.parse::<i32>().is_err() {
+        tracing::warn!("KillBackend: selected text is not a valid PID: {pid}");
+        return;
+    }
+
+    let sql = format!("SELECT pg_terminate_backend({pid})");
+    execute_system_query(workspace, &sql, window, cx);
 }

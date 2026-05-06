@@ -62,6 +62,8 @@ pub struct ConnectionPanel {
     expanded_nodes: HashSet<String>,
     // Workspace reference for cross-panel communication
     workspace: WeakEntity<Workspace>,
+    // Error message to display in the panel
+    error_message: Option<String>,
 }
 
 impl ConnectionPanel {
@@ -171,6 +173,7 @@ impl ConnectionPanel {
             schema_tree: None,
             expanded_nodes: HashSet::new(),
             workspace,
+            error_message: None,
         }
     }
 
@@ -295,6 +298,9 @@ impl ConnectionPanel {
         password: String,
         cx: &mut Context<Self>,
     ) {
+        // Clear any previous error
+        self.error_message = None;
+
         // Establish SSH tunnel if configured
         if profile.ssh.enabled {
             let original_host = profile.host.clone();
@@ -314,6 +320,8 @@ impl ConnectionPanel {
                 }
                 Err(e) => {
                     tracing::error!("SSH tunnel failed: {e}");
+                    self.error_message = Some(format!("SSH tunnel failed: {e}"));
+                    cx.notify();
                     return;
                 }
             }
@@ -343,16 +351,19 @@ impl ConnectionPanel {
                 }
                 Ok(Err(e)) => {
                     tracing::error!("connection failed: {e}");
-                    // Clean up tunnel on connection failure
-                    this.update(cx, |panel, _cx| {
+                    this.update(cx, |panel, cx| {
                         panel.ssh_tunnel = None;
+                        panel.error_message = Some(format!("Connection failed: {e}"));
+                        cx.notify();
                     })
                     .ok();
                 }
                 Err(e) => {
                     tracing::error!("runtime error: {e}");
-                    this.update(cx, |panel, _cx| {
+                    this.update(cx, |panel, cx| {
                         panel.ssh_tunnel = None;
+                        panel.error_message = Some(format!("Runtime error: {e}"));
+                        cx.notify();
                     })
                     .ok();
                 }
@@ -501,6 +512,7 @@ impl ConnectionPanel {
         self.ssh_tunnel = None; // Kills the SSH process via Drop
         self.schema_tree = None;
         self.expanded_nodes.clear();
+        self.error_message = None;
         cx.notify();
     }
 
@@ -568,6 +580,62 @@ impl ConnectionPanel {
                             };
                             editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
                             editor.insert(&insert_text, window, cx);
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    /// Generate an INSERT statement template for a table and insert it into the active editor.
+    fn generate_insert(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cols = columns.join(", ");
+        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${i}")).collect();
+        let vals = placeholders.join(", ");
+        let sql = format!("INSERT INTO \"{schema}\".\"{table}\" ({cols})\nVALUES ({vals});");
+        self.insert_sql_into_editor(&sql, window, cx);
+    }
+
+    /// Generate an UPDATE statement template for a table and insert it into the active editor.
+    fn generate_update(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sets: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("    {c} = ${}", i + 1))
+            .collect();
+        let sql = format!(
+            "UPDATE \"{schema}\".\"{table}\"\nSET\n{}\nWHERE /* condition */;",
+            sets.join(",\n")
+        );
+        self.insert_sql_into_editor(&sql, window, cx);
+    }
+
+    /// Insert SQL text into the active editor at the end.
+    fn insert_sql_into_editor(&self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            let sql = sql.to_string();
+            workspace.update(cx, |workspace, cx| {
+                if let Some(active_item) = workspace.active_item(cx) {
+                    if let Some(editor) = active_item.act_as::<Editor>(cx) {
+                        editor.update(cx, |editor, cx| {
+                            let text = editor.text(cx);
+                            let prefix = if text.is_empty() { "" } else { "\n\n" };
+                            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+                            editor.insert(&format!("{prefix}{sql}"), window, cx);
                         });
                     }
                 }
@@ -763,12 +831,13 @@ impl ConnectionPanel {
     }
 
     /// Render a table row that expands on click AND triggers data preview.
-    /// Also includes DDL and SQL buttons visible on hover.
+    /// Also includes DDL, SQL, INS, and UPD buttons visible on hover.
     fn render_table_row(
         &self,
         node_id: &str,
         table_name: &str,
         schema_name: &str,
+        columns: &[String],
         depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -779,6 +848,8 @@ impl ConnectionPanel {
         let id = SharedString::from(format!("tree-{node_id}"));
         let ddl_id = SharedString::from(format!("ddl-{node_id}"));
         let sql_id = SharedString::from(format!("sql-{node_id}"));
+        let ins_id = SharedString::from(format!("ins-{node_id}"));
+        let upd_id = SharedString::from(format!("upd-{node_id}"));
         let node_id_owned = node_id.to_string();
         let schema_owned = schema_name.to_string();
         let table_owned = table_name.to_string();
@@ -786,6 +857,12 @@ impl ConnectionPanel {
         let table_for_ddl = table_name.to_string();
         let schema_for_sql = schema_name.to_string();
         let table_for_sql = table_name.to_string();
+        let schema_for_ins = schema_name.to_string();
+        let table_for_ins = table_name.to_string();
+        let cols_for_ins = columns.to_vec();
+        let schema_for_upd = schema_name.to_string();
+        let table_for_upd = table_name.to_string();
+        let cols_for_upd = columns.to_vec();
 
         div()
             .id(id)
@@ -827,7 +904,45 @@ impl ConnectionPanel {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.generate_select(&schema_for_sql, &table_for_sql, window, cx);
                     }))
-                    .child("SQL"),
+                    .child("SEL"),
+            )
+            .child(
+                div()
+                    .id(ins_id)
+                    .text_xs()
+                    .mr_1()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.generate_insert(
+                            &schema_for_ins,
+                            &table_for_ins,
+                            &cols_for_ins,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child("INS"),
+            )
+            .child(
+                div()
+                    .id(upd_id)
+                    .text_xs()
+                    .mr_1()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.generate_update(
+                            &schema_for_upd,
+                            &table_for_upd,
+                            &cols_for_upd,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child("UPD"),
             )
             .child(
                 div()
@@ -854,7 +969,19 @@ impl ConnectionPanel {
     ) {
         let qualified = format!("{}.{}", schema_name, table.info.name);
         let table_id = format!("table:{qualified}");
-        rows.push(self.render_table_row(&table_id, &table.info.name, schema_name, depth, cx));
+        let col_names: Vec<String> = table
+            .columns
+            .iter()
+            .map(|c| format!("\"{}\"", c.name))
+            .collect();
+        rows.push(self.render_table_row(
+            &table_id,
+            &table.info.name,
+            schema_name,
+            &col_names,
+            depth,
+            cx,
+        ));
 
         if self.is_expanded(&table_id) {
             // Columns
@@ -1530,6 +1657,23 @@ impl Render for ConnectionPanel {
             .flex_col()
             .overflow_hidden()
             .child(self.render_header(cx));
+
+        // Show error message if present
+        if let Some(error) = &self.error_message {
+            panel = panel.child(
+                div()
+                    .mx_2()
+                    .mb_2()
+                    .p_2()
+                    .rounded_sm()
+                    .bg(cx.theme().status().error_background)
+                    .border_1()
+                    .border_color(cx.theme().status().error_border)
+                    .text_xs()
+                    .text_color(cx.theme().status().error)
+                    .child(error.clone()),
+            );
+        }
 
         if self.show_form {
             panel = panel.child(self.render_form(cx));
