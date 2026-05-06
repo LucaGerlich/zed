@@ -47,7 +47,13 @@ actions!(
         SequenceValues,
         ViewDependencies,
         ConnectionStats,
-        WalStatus
+        WalStatus,
+        TableBloat,
+        UnusedIndexes,
+        MissingIndexes,
+        ViewPartitions,
+        AutovacuumStatus,
+        ViewForeignTables
     ]
 );
 
@@ -222,6 +228,36 @@ pub fn init(cx: &mut App) {
             // Register the WalStatus action on the workspace
             workspace.register_action(|workspace, _: &WalStatus, window, cx| {
                 wal_status_action(workspace, window, cx);
+            });
+
+            // Register the TableBloat action on the workspace
+            workspace.register_action(|workspace, _: &TableBloat, window, cx| {
+                table_bloat_action(workspace, window, cx);
+            });
+
+            // Register the UnusedIndexes action on the workspace
+            workspace.register_action(|workspace, _: &UnusedIndexes, window, cx| {
+                unused_indexes_action(workspace, window, cx);
+            });
+
+            // Register the MissingIndexes action on the workspace
+            workspace.register_action(|workspace, _: &MissingIndexes, window, cx| {
+                missing_indexes_action(workspace, window, cx);
+            });
+
+            // Register the ViewPartitions action on the workspace
+            workspace.register_action(|workspace, _: &ViewPartitions, window, cx| {
+                view_partitions_action(workspace, window, cx);
+            });
+
+            // Register the AutovacuumStatus action on the workspace
+            workspace.register_action(|workspace, _: &AutovacuumStatus, window, cx| {
+                autovacuum_status_action(workspace, window, cx);
+            });
+
+            // Register the ViewForeignTables action on the workspace
+            workspace.register_action(|workspace, _: &ViewForeignTables, window, cx| {
+                view_foreign_tables_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -1259,6 +1295,134 @@ fn wal_status_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
         pg_size_pretty((SELECT sum(size) FROM pg_ls_waldir())) AS wal_directory_size, \
         (SELECT setting FROM pg_settings WHERE name = 'wal_level') AS wal_level, \
         (SELECT setting FROM pg_settings WHERE name = 'max_wal_size') AS max_wal_size";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show tables with the most dead tuples (bloat candidates).
+fn table_bloat_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "SELECT \
+        schemaname || '.' || tablename AS table_name, \
+        pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size, \
+        CASE WHEN n_live_tup > 0 THEN \
+            round(100.0 * n_dead_tup / (n_live_tup + n_dead_tup), 1) \
+        ELSE 0 END AS dead_tuple_pct, \
+        n_live_tup AS live_tuples, \
+        n_dead_tup AS dead_tuples, \
+        last_vacuum::text, \
+        last_autovacuum::text, \
+        last_analyze::text \
+    FROM pg_stat_user_tables \
+    WHERE n_dead_tup > 0 \
+    ORDER BY n_dead_tup DESC \
+    LIMIT 30";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show indexes that have never been used (candidates for removal).
+fn unused_indexes_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        schemaname || '.' || relname AS table_name, \
+        indexrelname AS index_name, \
+        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size, \
+        idx_scan AS times_used, \
+        idx_tup_read AS tuples_read \
+    FROM pg_stat_user_indexes \
+    WHERE idx_scan = 0 \
+        AND indexrelname NOT LIKE '%_pkey' \
+    ORDER BY pg_relation_size(indexrelid) DESC \
+    LIMIT 30";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show tables with high sequential scan ratios (missing index candidates).
+fn missing_indexes_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        schemaname || '.' || relname AS table_name, \
+        seq_scan AS sequential_scans, \
+        idx_scan AS index_scans, \
+        CASE WHEN (seq_scan + idx_scan) > 0 THEN \
+            round(100.0 * seq_scan / (seq_scan + idx_scan), 1) \
+        ELSE 0 END AS seq_scan_pct, \
+        n_live_tup AS estimated_rows, \
+        pg_size_pretty(pg_relation_size(relid)) AS table_size \
+    FROM pg_stat_user_tables \
+    WHERE seq_scan > idx_scan \
+        AND n_live_tup > 1000 \
+    ORDER BY seq_scan DESC \
+    LIMIT 20";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show table partitions with their bounds, sizes, and estimated rows.
+fn view_partitions_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        parent.relname AS parent_table, \
+        child.relname AS partition, \
+        pg_get_expr(child.relpartbound, child.oid) AS partition_bound, \
+        pg_size_pretty(pg_relation_size(child.oid)) AS size, \
+        (SELECT reltuples::bigint FROM pg_class WHERE oid = child.oid) AS est_rows \
+    FROM pg_inherits \
+    JOIN pg_class parent ON parent.oid = inhparent \
+    JOIN pg_class child ON child.oid = inhrelid \
+    JOIN pg_namespace n ON n.oid = parent.relnamespace \
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') \
+    ORDER BY parent.relname, child.relname";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show active autovacuum workers and their progress.
+fn autovacuum_status_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pid, \
+        datname AS database, \
+        relid::regclass AS table_name, \
+        phase, \
+        heap_blks_total, \
+        heap_blks_scanned, \
+        CASE WHEN heap_blks_total > 0 THEN \
+            round(100.0 * heap_blks_scanned / heap_blks_total, 1) \
+        ELSE 0 END AS scan_pct, \
+        now() - query_start AS duration \
+    FROM pg_stat_progress_vacuum \
+    JOIN pg_stat_activity USING (pid) \
+    ORDER BY query_start";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show foreign tables and their associated foreign servers.
+fn view_foreign_tables_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        foreign_table_schema AS schema, \
+        foreign_table_name AS table_name, \
+        foreign_server_name AS server \
+    FROM information_schema.foreign_tables \
+    ORDER BY foreign_table_schema, foreign_table_name";
 
     execute_system_query(workspace, sql, window, cx);
 }
