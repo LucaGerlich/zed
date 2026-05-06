@@ -4725,6 +4725,7 @@ dependencies = [
  "pgblade-core",
  "pgblade-postgres",
  "pgblade-security",
+ "picker",
  "serde",
  "serde_json",
  "sqlformat",

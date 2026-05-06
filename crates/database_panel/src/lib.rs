@@ -1,10 +1,12 @@
 mod connection_panel;
 mod result_panel;
+mod sql_completion;
 
 use editor::Editor;
 use editor::actions::SelectAll;
 use gpui::{App, AppContext as _, ClipboardItem, Context, Entity, Window, actions};
 use language;
+use picker::Picker;
 use workspace::Workspace;
 
 pub use connection_panel::ConnectionPanel;
@@ -29,7 +31,8 @@ actions!(
         ERDiagram,
         ImportCsv,
         CompareSchemas,
-        ViewExtensions
+        ViewExtensions,
+        SqlComplete
     ]
 );
 
@@ -124,6 +127,11 @@ pub fn init(cx: &mut App) {
             // Register the ViewExtensions action on the workspace
             workspace.register_action(|workspace, _: &ViewExtensions, window, cx| {
                 view_extensions_action(workspace, window, cx);
+            });
+
+            // Register the SqlComplete action on the workspace
+            workspace.register_action(|workspace, _: &SqlComplete, window, cx| {
+                sql_complete_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -733,4 +741,29 @@ fn view_extensions_action(
     ORDER BY e.extname";
 
     execute_system_query(workspace, sql, window, cx);
+}
+
+/// Open the SQL completion picker populated with schema objects and SQL keywords.
+fn sql_complete_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(schema_tree) = conn_panel.read(cx).schema_tree() else {
+        tracing::warn!(
+            "SqlComplete: no schema tree available (not connected or schema not loaded)"
+        );
+        return;
+    };
+
+    let items = sql_completion::build_completion_items(schema_tree);
+    let workspace_weak = cx.weak_entity();
+
+    workspace.toggle_modal(window, cx, |window, cx| {
+        let delegate = sql_completion::SqlCompletionDelegate::new(items, workspace_weak);
+        Picker::uniform_list(delegate, window, cx)
+    });
 }

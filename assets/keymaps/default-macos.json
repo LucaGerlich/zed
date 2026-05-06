@@ -1647,6 +1647,7 @@
     "bindings": {
       "cmd-enter": "database_panel::ExecuteQuery",
       "cmd-alt-x": "database_panel::ExplainAnalyze",
+      "ctrl-space": "database_panel::SqlComplete",
     },
   },
 ]
