@@ -3,7 +3,9 @@ use std::sync::Arc;
 use gpui::*;
 use tokio::runtime::Runtime;
 use ui::prelude::*;
-use ui::{Button, ButtonStyle, IconName, LabelSize};
+use ui::{
+    Button, ButtonStyle, IconButton, IconName, IconSize, Label, LabelCommon, LabelSize, Tooltip,
+};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -703,10 +705,8 @@ impl ResultPanel {
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h(px(28.))
-            .flex()
-            .flex_row()
+        h_flex()
+            .h(px(30.))
             .items_center()
             .border_b_1()
             .border_color(cx.theme().colors().border)
@@ -719,100 +719,125 @@ impl ResultPanel {
                 } else {
                     cx.theme().colors().tab_inactive_background
                 };
-                let text_color = if is_active {
-                    cx.theme().colors().text
-                } else {
-                    cx.theme().colors().text_muted
-                };
-                let close_color = cx.theme().colors().text_disabled;
-                let close_hover_color = cx.theme().colors().text;
                 let idx = i;
+                // Truncate label to 25 chars for preview
+                let display_label: String = if tab.label.len() > 25 {
+                    format!("{}...", &tab.label[..25])
+                } else {
+                    tab.label.clone()
+                };
 
-                div()
+                h_flex()
                     .id(SharedString::from(format!("result-tab-{i}")))
                     .h_full()
                     .px_2()
-                    .flex()
                     .items_center()
                     .gap_1()
                     .bg(bg)
-                    .text_xs()
-                    .text_color(text_color)
                     .cursor_pointer()
+                    .when(is_active, |s| {
+                        s.border_b_2().border_color(cx.theme().colors().text_accent)
+                    })
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.active_tab = idx;
                         this.selected_row = None;
                         cx.notify();
                     }))
-                    .child(tab.label.clone())
                     .child(
-                        div()
-                            .id(SharedString::from(format!("close-result-tab-{i}")))
-                            .text_xs()
-                            .text_color(close_color)
-                            .hover(|s| s.text_color(close_hover_color))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _window, cx| {
+                        Label::new(display_label)
+                            .size(LabelSize::XSmall)
+                            .color(if is_active {
+                                Color::Default
+                            } else {
+                                Color::Muted
+                            }),
+                    )
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!("close-result-tab-{i}")),
+                            IconName::XCircle,
+                        )
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Muted)
+                        .style(ButtonStyle::Subtle)
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
                                 this.close_tab(idx, cx);
-                            }))
-                            .child("x"),
+                            },
+                        )),
                     )
             }))
     }
 
-    fn render_empty(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_empty(&self, _cx: &Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
             .child(
-                div()
-                    .flex()
-                    .flex_col()
+                v_flex()
                     .items_center()
                     .gap_2()
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().colors().text_muted)
-                            .child("No query results"),
+                        Icon::new(IconName::ListTree)
+                            .size(IconSize::Medium)
+                            .color(Color::Muted),
                     )
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().colors().text_disabled)
-                            .child("Execute a query with Cmd+Enter to see results here"),
+                        Label::new("No query results")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("Execute a query with Cmd+Enter to see results here")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Disabled),
                     ),
             )
     }
 
-    fn render_loading(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_loading(&self, _cx: &Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
             .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child("Executing query..."),
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Icon::new(IconName::LoadCircle)
+                            .size(IconSize::Medium)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("Executing query...")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
             )
     }
 
     fn render_error(&self, message: &str, cx: &Context<Self>) -> impl IntoElement {
-        div()
+        v_flex()
             .size_full()
-            .flex()
-            .flex_col()
             .p_2()
             .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(gpui::red())
-                    .child("Query Error"),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::XCircle)
+                            .size(IconSize::Small)
+                            .color(Color::Error),
+                    )
+                    .child(
+                        Label::new("Query Error")
+                            .size(LabelSize::Small)
+                            .weight(FontWeight::SEMIBOLD)
+                            .color(Color::Error),
+                    ),
             )
             .child(
                 div()
@@ -822,44 +847,44 @@ impl ResultPanel {
                     .bg(cx.theme().colors().surface_background)
                     .border_1()
                     .border_color(cx.theme().colors().border)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().colors().text)
-                            .child(message.to_string()),
-                    ),
+                    .child(Label::new(message.to_string()).size(LabelSize::XSmall)),
             )
     }
 
     fn render_ddl(&self, ddl: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let ddl_text = ddl.to_string();
-        div()
+        v_flex()
             .size_full()
-            .flex()
-            .flex_col()
             .overflow_hidden()
             .child(
-                div()
-                    .flex()
-                    .flex_row()
+                h_flex()
                     .items_center()
                     .justify_between()
-                    .h(px(28.))
+                    .h(px(30.))
                     .px_2()
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
                     .bg(cx.theme().colors().title_bar_background)
                     .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().colors().text)
-                            .child("Table DDL"),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::FileCode)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new("Table DDL")
+                                    .size(LabelSize::Small)
+                                    .weight(FontWeight::SEMIBOLD),
+                            ),
                     )
                     .child(
-                        Button::new("copy-ddl", "Copy")
+                        IconButton::new("copy-ddl", IconName::Copy)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
                             .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
+                            .tooltip(Tooltip::text("Copy DDL"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 if let ResultState::Ddl(ref ddl) = this.tabs[this.active_tab].state
                                 {
@@ -887,32 +912,38 @@ impl ResultPanel {
 
     fn render_explain(&self, plan: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let plan_owned = plan.to_string();
-        div()
+        v_flex()
             .size_full()
-            .flex()
-            .flex_col()
             .overflow_hidden()
             .child(
-                div()
-                    .h(px(28.))
+                h_flex()
+                    .h(px(30.))
                     .px_2()
-                    .flex()
                     .items_center()
                     .justify_between()
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
                     .bg(cx.theme().colors().title_bar_background)
                     .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().colors().text)
-                            .child("Query Execution Plan"),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::PlayFilled)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new("Query Execution Plan")
+                                    .size(LabelSize::Small)
+                                    .weight(FontWeight::SEMIBOLD),
+                            ),
                     )
                     .child(
-                        Button::new("copy-plan", "Copy")
+                        IconButton::new("copy-plan", IconName::Copy)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Muted)
                             .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
+                            .tooltip(Tooltip::text("Copy Plan"))
                             .on_click(cx.listener(move |_this, _, _window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     plan_owned.clone(),
@@ -1001,18 +1032,13 @@ impl ResultPanel {
         columns: &[ColumnMeta],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut header = div()
-            .flex()
-            .flex_row()
-            .h(px(24.))
+        let mut header = h_flex()
+            .h(px(26.))
             .px_1()
             .bg(cx.theme().colors().title_bar_background)
             .border_b_1()
             .border_color(cx.theme().colors().border);
 
-        // Extract theme colors upfront so closures capture owned Hsla values
-        let text_disabled = cx.theme().colors().text_disabled;
-        let text_color = cx.theme().colors().text;
         let hover_bg = cx.theme().colors().element_hover;
 
         // Row number column
@@ -1020,11 +1046,13 @@ impl ResultPanel {
             div()
                 .w(px(40.))
                 .flex_shrink_0()
-                .text_xs()
-                .text_color(text_disabled)
                 .flex()
                 .items_center()
-                .child("#"),
+                .child(
+                    Label::new("#")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Disabled),
+                ),
         );
 
         let active_sort_column = self.tabs[self.active_tab].sort_column;
@@ -1062,13 +1090,10 @@ impl ResultPanel {
                         cx.notify();
                     }))
                     .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(text_color)
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(format!("{}{sort_indicator}", col.name)),
+                        Label::new(format!("{}{sort_indicator}", col.name))
+                            .size(LabelSize::XSmall)
+                            .weight(FontWeight::SEMIBOLD)
+                            .truncate(),
                     ),
             );
         }
@@ -1167,95 +1192,126 @@ impl ResultPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let row_word = if row_count == 1 { "row" } else { "rows" };
-        let selected_info = self
-            .selected_row
-            .map(|r| format!(" | Row {} selected", r + 1))
-            .unwrap_or_default();
-        let tab_info = format!(
-            "Fetched {row_count} {row_word} in {duration_ms}ms | Tab {} of {}{}",
-            self.active_tab + 1,
-            self.tabs.len(),
-            selected_info
-        );
         let has_selected = self.selected_row.is_some();
 
-        let mut footer = div()
-            .flex()
-            .flex_row()
+        // Left: row count + timing
+        let left_info = format!("{row_count} {row_word} in {duration_ms}ms");
+        // Center: tab indicator
+        let center_info = format!("Tab {} / {}", self.active_tab + 1, self.tabs.len());
+        // Selected row info
+        let selected_info = self
+            .selected_row
+            .map(|r| format!("Row {}", r + 1))
+            .unwrap_or_default();
+
+        let mut footer = h_flex()
             .items_center()
-            .h(px(28.))
+            .h(px(30.))
             .px_2()
             .border_t_1()
             .border_color(cx.theme().colors().border)
-            .bg(cx.theme().colors().title_bar_background)
-            .child(
-                div()
-                    .flex_1()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child(tab_info),
-            );
+            .bg(cx.theme().colors().title_bar_background);
 
-        let mut buttons = div().flex().flex_row().gap_1();
+        // Left side: row count + timing
+        footer = footer.child(
+            h_flex()
+                .flex_1()
+                .gap_2()
+                .child(
+                    Label::new(left_info)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .when(!selected_info.is_empty(), |s| {
+                    s.child(
+                        Label::new(selected_info)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Accent),
+                    )
+                }),
+        );
+
+        // Center: tab info
+        footer = footer.child(
+            Label::new(center_info)
+                .size(LabelSize::XSmall)
+                .color(Color::Disabled),
+        );
+
+        // Right side: action buttons
+        let mut buttons = h_flex().flex_1().justify_end().gap_0p5();
 
         // Show Edit Row and Delete Row buttons when a row is selected
         if has_selected {
             buttons = buttons
                 .child(
-                    Button::new("edit-row-btn", "Edit Row")
+                    IconButton::new("edit-row-btn", IconName::Pencil)
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Muted)
                         .style(ButtonStyle::Subtle)
-                        .label_size(LabelSize::XSmall)
+                        .tooltip(Tooltip::text("Edit Row"))
                         .on_click(cx.listener(|this, _, _window, cx| this.edit_selected_row(cx))),
                 )
                 .child(
-                    Button::new("delete-row-btn", "Delete Row")
+                    IconButton::new("delete-row-btn", IconName::Trash)
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Error)
                         .style(ButtonStyle::Subtle)
-                        .label_size(LabelSize::XSmall)
+                        .tooltip(Tooltip::text("Delete Row"))
                         .on_click(cx.listener(|this, _, _window, cx| this.delete_selected_row(cx))),
                 );
         }
 
         buttons = buttons
             .child(
-                Button::new("refresh-btn", "Refresh")
+                IconButton::new("refresh-btn", IconName::RefreshTitle)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
                     .style(ButtonStyle::Subtle)
-                    .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Refresh"))
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh_current_tab(cx))),
             )
             .child(
-                Button::new("clear-btn", "Clear")
+                IconButton::new("clear-btn", IconName::Eraser)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
                     .style(ButtonStyle::Subtle)
-                    .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Clear All Tabs"))
                     .on_click(cx.listener(|this, _, _window, cx| this.clear_all(cx))),
             )
             .child(
                 Button::new("export-csv", "CSV")
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Copy as CSV"))
                     .on_click(cx.listener(|this, _, _window, cx| this.export_csv(cx))),
             )
             .child(
                 Button::new("export-json", "JSON")
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Copy as JSON"))
                     .on_click(cx.listener(|this, _, _window, cx| this.export_json(cx))),
             )
             .child(
-                Button::new("export-insert", "INSERT")
+                Button::new("export-insert", "INS")
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Copy as INSERT"))
                     .on_click(cx.listener(|this, _, _window, cx| this.export_insert(cx))),
             )
             .child(
-                Button::new("export-update", "UPDATE")
+                Button::new("export-update", "UPD")
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Copy as UPDATE"))
                     .on_click(cx.listener(|this, _, _window, cx| this.export_update(cx))),
             )
             .child(
-                Button::new("export-delete", "DELETE")
+                Button::new("export-delete", "DEL")
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Copy as DELETE"))
                     .on_click(cx.listener(|this, _, _window, cx| this.export_delete(cx))),
             );
 

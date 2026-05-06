@@ -5,7 +5,10 @@ use editor::Editor;
 use gpui::*;
 use tokio::runtime::Runtime;
 use ui::prelude::*;
-use ui::{Button, ButtonStyle, IconName};
+use ui::{
+    Button, ButtonStyle, IconButton, IconName, IconSize, Label, LabelCommon, LabelSize, ListItem,
+    ListItemSpacing, Tooltip,
+};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -917,36 +920,21 @@ impl ConnectionPanel {
         depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let indent = depth as f32 * 12.0;
-
         let id = SharedString::from(format!("tree-{node_id}"));
-        let src_id = SharedString::from(format!("src-{node_id}"));
         let trigger_for_src = trigger_name.to_string();
         let table_for_src = table_name.to_string();
         let schema_for_src = schema_name.to_string();
 
-        div()
-            .id(id)
-            .h(px(22.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .pl(px(indent + 4.0))
-            .pr_1()
-            .text_xs()
-            .text_color(cx.theme().colors().text)
-            .hover(|s| s.bg(cx.theme().colors().element_hover))
-            .child(div().text_color(cx.theme().colors().text_muted).child("  "))
-            .child(div().flex_1().child(label.to_string()))
-            .child(
-                div()
-                    .id(src_id)
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
-                    .px_1()
-                    .rounded_sm()
+        ListItem::new(id)
+            .indent_level(depth)
+            .indent_step_size(px(12.))
+            .spacing(ListItemSpacing::ExtraDense)
+            .end_slot_on_hover(
+                IconButton::new(SharedString::from(format!("src-{node_id}")), IconName::Code)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("View Source"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_trigger_source(
                             &trigger_for_src,
@@ -955,8 +943,17 @@ impl ConnectionPanel {
                             window,
                             cx,
                         );
-                    }))
-                    .child("SRC"),
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::DatabaseZap)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(label.to_string()).size(LabelSize::Small)),
             )
             .into_any_element()
     }
@@ -1067,31 +1064,29 @@ impl ConnectionPanel {
         label: &str,
         depth: usize,
         has_children: bool,
+        icon: Option<IconName>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let indent = depth as f32 * 12.0;
         let is_expanded = self.expanded_nodes.contains(node_id);
-        let chevron = if has_children {
-            if is_expanded { "v " } else { "> " }
-        } else {
-            "  "
-        };
-
         let id = SharedString::from(format!("tree-{node_id}"));
         let node_id_owned = node_id.to_string();
 
-        div()
-            .id(id)
-            .h(px(22.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .pl(px(indent + 4.0))
-            .pr_1()
-            .text_xs()
-            .text_color(cx.theme().colors().text)
-            .hover(|s| s.bg(cx.theme().colors().element_hover))
-            .cursor_pointer()
+        ListItem::new(id)
+            .indent_level(depth)
+            .indent_step_size(px(12.))
+            .spacing(ListItemSpacing::ExtraDense)
+            .toggle(has_children.then_some(is_expanded))
+            .on_toggle(cx.listener({
+                let node_id = node_id_owned.clone();
+                move |this, _, _window, cx| {
+                    if this.expanded_nodes.contains(&node_id) {
+                        this.expanded_nodes.remove(&node_id);
+                    } else {
+                        this.expanded_nodes.insert(node_id.clone());
+                    }
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if has_children {
                     if this.expanded_nodes.contains(&node_id_owned) {
@@ -1103,11 +1098,11 @@ impl ConnectionPanel {
                 }
             }))
             .child(
-                div()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child(chevron.to_string()),
+                h_flex()
+                    .gap_1()
+                    .children(icon.map(|i| Icon::new(i).size(IconSize::XSmall).color(Color::Muted)))
+                    .child(Label::new(label.to_string()).size(LabelSize::Small)),
             )
-            .child(label.to_string())
             .into_any_element()
     }
 
@@ -1121,39 +1116,33 @@ impl ConnectionPanel {
         depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let indent = depth as f32 * 12.0;
-
         let id = SharedString::from(format!("tree-{node_id}"));
-        let src_id = SharedString::from(format!("src-{node_id}"));
         let func_for_src = func_name.to_string();
         let schema_for_src = schema_name.to_string();
 
-        div()
-            .id(id)
-            .h(px(22.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .pl(px(indent + 4.0))
-            .pr_1()
-            .text_xs()
-            .text_color(cx.theme().colors().text)
-            .hover(|s| s.bg(cx.theme().colors().element_hover))
-            .child(div().text_color(cx.theme().colors().text_muted).child("  "))
-            .child(div().flex_1().child(label.to_string()))
-            .child(
-                div()
-                    .id(src_id)
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
-                    .px_1()
-                    .rounded_sm()
+        ListItem::new(id)
+            .indent_level(depth)
+            .indent_step_size(px(12.))
+            .spacing(ListItemSpacing::ExtraDense)
+            .end_slot_on_hover(
+                IconButton::new(SharedString::from(format!("src-{node_id}")), IconName::Code)
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .style(ButtonStyle::Subtle)
+                    .tooltip(Tooltip::text("View Source"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_function_source(&func_for_src, &schema_for_src, window, cx);
-                    }))
-                    .child("SRC"),
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::Code)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(label.to_string()).size(LabelSize::Small)),
             )
             .into_any_element()
     }
@@ -1170,7 +1159,7 @@ impl ConnectionPanel {
     }
 
     /// Render a table row that expands on click AND triggers data preview.
-    /// Also includes DDL, SQL, INS, and UPD buttons visible on hover.
+    /// Also includes action buttons visible on hover.
     /// For views/materialized views, a DEF button is shown to fetch the view definition.
     #[allow(clippy::too_many_arguments)]
     fn render_table_row(
@@ -1183,25 +1172,13 @@ impl ConnectionPanel {
         depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let indent = depth as f32 * 12.0;
         let is_expanded = self.expanded_nodes.contains(node_id);
-        let chevron = if is_expanded { "v " } else { "> " };
-
         let id = SharedString::from(format!("tree-{node_id}"));
-        let ddl_id = SharedString::from(format!("ddl-{node_id}"));
-        let sql_id = SharedString::from(format!("sql-{node_id}"));
-        let ins_id = SharedString::from(format!("ins-{node_id}"));
-        let upd_id = SharedString::from(format!("upd-{node_id}"));
-        let cnt_id = SharedString::from(format!("cnt-{node_id}"));
-        let trunc_id = SharedString::from(format!("trunc-{node_id}"));
-        let vac_id = SharedString::from(format!("vac-{node_id}"));
-        let def_id = SharedString::from(format!("def-{node_id}"));
-        let ref_id = SharedString::from(format!("ref-{node_id}"));
         let node_id_owned = node_id.to_string();
         let schema_owned = schema_name.to_string();
         let table_owned = table_name.to_string();
-        let schema_for_ddl = schema_name.to_string();
-        let table_for_ddl = table_name.to_string();
+
+        // Build hover action buttons
         let schema_for_sql = schema_name.to_string();
         let table_for_sql = table_name.to_string();
         let schema_for_ins = schema_name.to_string();
@@ -1210,6 +1187,8 @@ impl ConnectionPanel {
         let schema_for_upd = schema_name.to_string();
         let table_for_upd = table_name.to_string();
         let cols_for_upd = columns.to_vec();
+        let schema_for_ddl = schema_name.to_string();
+        let table_for_ddl = table_name.to_string();
         let schema_for_cnt = schema_name.to_string();
         let table_for_cnt = table_name.to_string();
         let schema_for_trunc = schema_name.to_string();
@@ -1222,56 +1201,26 @@ impl ConnectionPanel {
         let show_def_button = matches!(kind, TableKind::View | TableKind::MaterializedView);
         let show_ref_button = matches!(kind, TableKind::MaterializedView);
 
-        let mut row = div()
-            .id(id)
-            .h(px(22.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .pl(px(indent + 4.0))
-            .pr_1()
-            .text_xs()
-            .text_color(cx.theme().colors().text)
-            .hover(|s| s.bg(cx.theme().colors().element_hover))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, window, cx| {
-                // Toggle expand/collapse
-                if this.expanded_nodes.contains(&node_id_owned) {
-                    this.expanded_nodes.remove(&node_id_owned);
-                } else {
-                    this.expanded_nodes.insert(node_id_owned.clone());
-                }
-                cx.notify();
-                // Preview table data
-                this.preview_table(&schema_owned, &table_owned, window, cx);
-            }))
+        let icon = match kind {
+            TableKind::View | TableKind::MaterializedView => IconName::Eye,
+            TableKind::Table => IconName::ListTree,
+        };
+
+        let mut hover_actions = h_flex().gap_0p5();
+
+        hover_actions = hover_actions
             .child(
-                div()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child(chevron.to_string()),
-            )
-            .child(div().flex_1().child(table_name.to_string()))
-            .child(
-                div()
-                    .id(sql_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+                Button::new(SharedString::from(format!("sql-{node_id}")), "SEL")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.generate_select(&schema_for_sql, &table_for_sql, window, cx);
-                    }))
-                    .child("SEL"),
+                    })),
             )
             .child(
-                div()
-                    .id(ins_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+                Button::new(SharedString::from(format!("ins-{node_id}")), "INS")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.generate_insert(
                             &schema_for_ins,
@@ -1280,17 +1229,12 @@ impl ConnectionPanel {
                             window,
                             cx,
                         );
-                    }))
-                    .child("INS"),
+                    })),
             )
             .child(
-                div()
-                    .id(upd_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+                Button::new(SharedString::from(format!("upd-{node_id}")), "UPD")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.generate_update(
                             &schema_for_upd,
@@ -1299,98 +1243,101 @@ impl ConnectionPanel {
                             window,
                             cx,
                         );
-                    }))
-                    .child("UPD"),
+                    })),
             )
             .child(
-                div()
-                    .id(ddl_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+                Button::new(SharedString::from(format!("ddl-{node_id}")), "DDL")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_ddl(&schema_for_ddl, &table_for_ddl, window, cx);
-                    }))
-                    .child("DDL"),
+                    })),
             );
 
-        // DEF button for views and materialized views
         if show_def_button {
-            row = row.child(
-                div()
-                    .id(def_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+            hover_actions = hover_actions.child(
+                Button::new(SharedString::from(format!("def-{node_id}")), "DEF")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_view_definition(&table_for_def, window, cx);
-                    }))
-                    .child("DEF"),
+                    })),
             );
         }
 
-        // REF button for materialized views (refresh)
         if show_ref_button {
-            row = row.child(
-                div()
-                    .id(ref_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+            hover_actions = hover_actions.child(
+                Button::new(SharedString::from(format!("ref-{node_id}")), "REF")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.refresh_materialized_view(&schema_for_ref, &table_for_ref, window, cx);
-                    }))
-                    .child("REF"),
+                    })),
             );
         }
 
-        row = row
+        hover_actions = hover_actions
             .child(
-                div()
-                    .id(cnt_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+                Button::new(SharedString::from(format!("cnt-{node_id}")), "CNT")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.count_table(&schema_for_cnt, &table_for_cnt, window, cx);
-                    }))
-                    .child("CNT"),
+                    })),
             )
             .child(
-                div()
-                    .id(trunc_id)
-                    .text_xs()
-                    .mr_1()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(gpui::red()))
-                    .cursor_pointer()
+                Button::new(SharedString::from(format!("trunc-{node_id}")), "TRC")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.truncate_table(&schema_for_trunc, &table_for_trunc, window, cx);
-                    }))
-                    .child("TRC"),
+                    })),
             )
             .child(
-                div()
-                    .id(vac_id)
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_disabled)
-                    .hover(|s| s.text_color(cx.theme().colors().text))
-                    .cursor_pointer()
+                Button::new(SharedString::from(format!("vac-{node_id}")), "VAC")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.vacuum_table(&schema_for_vac, &table_for_vac, window, cx);
-                    }))
-                    .child("VAC"),
+                    })),
             );
 
-        row.into_any_element()
+        ListItem::new(id)
+            .indent_level(depth)
+            .indent_step_size(px(12.))
+            .spacing(ListItemSpacing::ExtraDense)
+            .toggle(Some(is_expanded))
+            .on_toggle(cx.listener({
+                let node_id = node_id_owned.clone();
+                let schema = schema_owned.clone();
+                let table = table_owned.clone();
+                move |this, _, window, cx| {
+                    if this.expanded_nodes.contains(&node_id) {
+                        this.expanded_nodes.remove(&node_id);
+                    } else {
+                        this.expanded_nodes.insert(node_id.clone());
+                    }
+                    cx.notify();
+                    this.preview_table(&schema, &table, window, cx);
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.expanded_nodes.contains(&node_id_owned) {
+                    this.expanded_nodes.remove(&node_id_owned);
+                } else {
+                    this.expanded_nodes.insert(node_id_owned.clone());
+                }
+                cx.notify();
+                this.preview_table(&schema_owned, &table_owned, window, cx);
+            }))
+            .end_slot_on_hover(hover_actions)
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+                    .child(Label::new(table_name.to_string()).size(LabelSize::Small)),
+            )
+            .into_any_element()
     }
 
     fn render_table_entry(
@@ -1432,18 +1379,24 @@ impl ConnectionPanel {
                 &format!("Columns ({})", table.columns.len()),
                 depth + 1,
                 !table.columns.is_empty(),
+                Some(IconName::ListTree),
                 cx,
             ));
             if self.is_expanded(&cols_id) {
                 for col in &table.columns {
-                    let pk = if col.is_primary_key { "PK " } else { "" };
+                    let col_icon = if col.is_primary_key {
+                        Some(IconName::LockOutlined)
+                    } else {
+                        Some(IconName::Dash)
+                    };
                     let null = if col.nullable { "?" } else { "" };
-                    let label = format!("{pk}{} ({}){null}", col.name, col.data_type);
+                    let label = format!("{} ({}){null}", col.name, col.data_type);
                     rows.push(self.render_tree_row(
                         &format!("col:{qualified}.{}", col.name),
                         &label,
                         depth + 2,
                         false,
+                        col_icon,
                         cx,
                     ));
                 }
@@ -1456,6 +1409,7 @@ impl ConnectionPanel {
                 &format!("Constraints ({})", table.constraints.len()),
                 depth + 1,
                 !table.constraints.is_empty(),
+                Some(IconName::LockOutlined),
                 cx,
             ));
             if self.is_expanded(&con_id) {
@@ -1465,6 +1419,7 @@ impl ConnectionPanel {
                         &format!("{} ({})", c.name, c.kind.label()),
                         depth + 2,
                         false,
+                        Some(IconName::LockOutlined),
                         cx,
                     ));
                 }
@@ -1477,6 +1432,7 @@ impl ConnectionPanel {
                 &format!("Foreign Keys ({})", table.foreign_keys.len()),
                 depth + 1,
                 !table.foreign_keys.is_empty(),
+                Some(IconName::Link),
                 cx,
             ));
             if self.is_expanded(&fk_id) {
@@ -1486,6 +1442,7 @@ impl ConnectionPanel {
                         &format!("{} -> {}", fk.name, fk.referenced_table),
                         depth + 2,
                         false,
+                        Some(IconName::Link),
                         cx,
                     ));
                 }
@@ -1498,6 +1455,7 @@ impl ConnectionPanel {
                 &format!("Indexes ({})", table.indexes.len()),
                 depth + 1,
                 !table.indexes.is_empty(),
+                Some(IconName::ListFilter),
                 cx,
             ));
             if self.is_expanded(&idx_id) {
@@ -1508,6 +1466,7 @@ impl ConnectionPanel {
                         &format!("{} ({}{})", idx.name, idx.index_type, unique),
                         depth + 2,
                         false,
+                        Some(IconName::ListFilter),
                         cx,
                     ));
                 }
@@ -1520,6 +1479,7 @@ impl ConnectionPanel {
                 &format!("Triggers ({})", table.triggers.len()),
                 depth + 1,
                 !table.triggers.is_empty(),
+                Some(IconName::DatabaseZap),
                 cx,
             ));
             if self.is_expanded(&trig_id) {
@@ -1562,18 +1522,33 @@ impl ConnectionPanel {
             &format!("{} (connected)", profile.name),
             0,
             true,
+            Some(IconName::DatabaseZap),
             cx,
         ));
 
         if self.is_expanded(&conn_id) {
             // Database level
             let db_id = format!("db:{}", profile.database);
-            rows.push(self.render_tree_row(&db_id, &profile.database, 1, true, cx));
+            rows.push(self.render_tree_row(
+                &db_id,
+                &profile.database,
+                1,
+                true,
+                Some(IconName::Server),
+                cx,
+            ));
 
             if self.is_expanded(&db_id) {
                 for schema in &tree.schemas {
                     let schema_id = format!("schema:{}", schema.info.name);
-                    rows.push(self.render_tree_row(&schema_id, &schema.info.name, 2, true, cx));
+                    rows.push(self.render_tree_row(
+                        &schema_id,
+                        &schema.info.name,
+                        2,
+                        true,
+                        Some(IconName::Folder),
+                        cx,
+                    ));
 
                     if self.is_expanded(&schema_id) {
                         // Tables category
@@ -1583,6 +1558,7 @@ impl ConnectionPanel {
                             &format!("Tables ({})", schema.tables.len()),
                             3,
                             !schema.tables.is_empty(),
+                            Some(IconName::ListTree),
                             cx,
                         ));
 
@@ -1599,6 +1575,7 @@ impl ConnectionPanel {
                             &format!("Views ({})", schema.views.len()),
                             3,
                             !schema.views.is_empty(),
+                            Some(IconName::Eye),
                             cx,
                         ));
                         if self.is_expanded(&views_id) {
@@ -1614,6 +1591,7 @@ impl ConnectionPanel {
                             &format!("Materialized Views ({})", schema.materialized_views.len()),
                             3,
                             !schema.materialized_views.is_empty(),
+                            Some(IconName::Eye),
                             cx,
                         ));
                         if self.is_expanded(&mv_id) {
@@ -1629,6 +1607,7 @@ impl ConnectionPanel {
                             &format!("Functions ({})", schema.functions.len()),
                             3,
                             !schema.functions.is_empty(),
+                            Some(IconName::Code),
                             cx,
                         ));
                         if self.is_expanded(&fn_id) {
@@ -1655,6 +1634,7 @@ impl ConnectionPanel {
                             &format!("Sequences ({})", schema.sequences.len()),
                             3,
                             !schema.sequences.is_empty(),
+                            Some(IconName::Hash),
                             cx,
                         ));
                         if self.is_expanded(&seq_id) {
@@ -1664,6 +1644,7 @@ impl ConnectionPanel {
                                     &seq.name,
                                     4,
                                     false,
+                                    Some(IconName::Hash),
                                     cx,
                                 ));
                             }
@@ -1677,111 +1658,116 @@ impl ConnectionPanel {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = div()
-            .flex()
-            .flex_row()
+        let header = h_flex()
             .items_center()
             .justify_between()
             .px_2()
-            .py_1();
+            .h(px(30.))
+            .border_b_1()
+            .border_color(cx.theme().colors().border);
 
         if let Some(profile) = &self.connected_profile {
             // Connected: show database name + disconnect/refresh buttons
             let profile_name = profile.name.clone();
             header
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
+                    h_flex()
                         .items_center()
                         .gap_1()
                         .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(gpui::green()))
                         .child(
-                            div()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(cx.theme().colors().text)
-                                .child(profile_name),
+                            Label::new(profile_name)
+                                .size(LabelSize::Small)
+                                .weight(FontWeight::SEMIBOLD),
                         ),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap_1()
+                    h_flex()
+                        .gap_0p5()
                         .child(
-                            div()
-                                .id("refresh-btn")
-                                .cursor_pointer()
-                                .text_xs()
-                                .text_color(cx.theme().colors().text_muted)
-                                .hover(|s| s.text_color(cx.theme().colors().text))
+                            IconButton::new("refresh-btn", IconName::RefreshTitle)
+                                .icon_size(IconSize::XSmall)
+                                .icon_color(Color::Muted)
+                                .style(ButtonStyle::Subtle)
+                                .tooltip(Tooltip::text("Refresh Schema"))
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.fetch_schema(cx);
-                                }))
-                                .child("Refresh"),
+                                })),
                         )
                         .child(
-                            div()
-                                .id("disconnect-btn")
-                                .cursor_pointer()
-                                .text_xs()
-                                .text_color(cx.theme().colors().text_muted)
-                                .hover(|s| s.text_color(gpui::red()))
+                            IconButton::new("disconnect-btn", IconName::XCircle)
+                                .icon_size(IconSize::XSmall)
+                                .icon_color(Color::Muted)
+                                .style(ButtonStyle::Subtle)
+                                .tooltip(Tooltip::text("Disconnect"))
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.disconnect(cx);
-                                }))
-                                .child("Disconnect"),
+                                })),
                         )
                         .child(
-                            div()
-                                .id("add-connection-btn")
-                                .cursor_pointer()
-                                .text_sm()
-                                .text_color(cx.theme().colors().text_muted)
-                                .hover(|s| s.text_color(cx.theme().colors().text))
+                            IconButton::new("add-connection-btn", IconName::Plus)
+                                .icon_size(IconSize::XSmall)
+                                .icon_color(Color::Muted)
+                                .style(ButtonStyle::Subtle)
+                                .tooltip(Tooltip::text("New Connection"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_form(window, cx);
-                                }))
-                                .child("+"),
+                                })),
                         ),
                 )
         } else {
             // Not connected: show title + add button
             header
                 .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().colors().text_muted)
-                        .child("DATABASE NAVIGATOR"),
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::DatabaseZap)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new("DATABASE")
+                                .size(LabelSize::XSmall)
+                                .weight(FontWeight::SEMIBOLD)
+                                .color(Color::Muted),
+                        ),
                 )
                 .child(
-                    div()
-                        .id("add-connection-btn")
-                        .cursor_pointer()
-                        .text_sm()
-                        .text_color(cx.theme().colors().text_muted)
-                        .hover(|s| s.text_color(cx.theme().colors().text))
+                    IconButton::new("add-connection-btn", IconName::Plus)
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Muted)
+                        .style(ButtonStyle::Subtle)
+                        .tooltip(Tooltip::text("New Connection"))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.toggle_form(window, cx);
-                        }))
-                        .child("+"),
+                        })),
                 )
         }
     }
 
     fn render_connection_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col();
+        let mut list = v_flex();
 
         if self.saved_connections.is_empty() {
             list = list.child(
                 div()
                     .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child("No connections yet"),
+                    .py_4()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::DatabaseZap)
+                            .size(IconSize::Medium)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("No connections yet")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
             );
         }
 
@@ -1792,50 +1778,75 @@ impl ConnectionPanel {
                 _ => rgb(0x4ec94e),
             };
             let name = conn.name.clone();
+            let host_info = format!("{}:{} / {}", conn.host, conn.port, conn.database);
+            let env_label = match conn.environment {
+                Environment::Production => "PROD",
+                Environment::Staging => "STG",
+                Environment::Development => "DEV",
+                Environment::Local => "LOCAL",
+            };
             let idx = i;
-
             let connect_idx = i;
+
             list = list.child(
-                div()
-                    .id(SharedString::from(format!("conn-{i}")))
-                    .h(px(26.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().colors().element_active))
+                ListItem::new(SharedString::from(format!("conn-{i}")))
+                    .spacing(ListItemSpacing::Dense)
+                    .inset(true)
+                    .start_slot(
+                        div()
+                            .w(px(8.))
+                            .h(px(8.))
+                            .rounded_full()
+                            .bg(env_color)
+                            .flex_shrink_0(),
+                    )
+                    .end_slot_on_hover(
+                        IconButton::new(
+                            SharedString::from(format!("del-conn-{i}")),
+                            IconName::Trash,
+                        )
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Error)
+                        .style(ButtonStyle::Subtle)
+                        .tooltip(Tooltip::text("Delete Connection"))
+                        .on_click(cx.listener(
+                            move |this, _, _window, cx| {
+                                this.delete_connection(idx, cx);
+                            },
+                        )),
+                    )
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.connect_saved(connect_idx, cx);
                     }))
                     .child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded_full()
-                            .bg(env_color)
-                            .mr_2()
-                            .flex_shrink_0(),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(cx.theme().colors().text)
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("del-conn-{i}")))
-                            .text_xs()
-                            .text_color(cx.theme().colors().text_muted)
-                            .hover(|s| s.text_color(gpui::red()))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.delete_connection(idx, cx);
-                            }))
-                            .child("x"),
+                        v_flex()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(Label::new(name).size(LabelSize::Small))
+                                    .child({
+                                        let badge_bg: Hsla = env_color.into();
+                                        let faded_bg = Hsla {
+                                            a: 0.15,
+                                            ..badge_bg
+                                        };
+                                        div()
+                                            .px(px(4.))
+                                            .py(px(1.))
+                                            .rounded(px(3.))
+                                            .bg(faded_bg)
+                                            .child(
+                                                Label::new(env_label)
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                    }),
+                            )
+                            .child(
+                                Label::new(host_info)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
                     ),
             );
         }
@@ -1849,15 +1860,12 @@ impl ConnectionPanel {
         editor: &Entity<Editor>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
+        v_flex()
+            .gap(px(4.))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child(label.to_string()),
+                Label::new(label.to_string())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
             )
             .child(
                 div()
@@ -1879,43 +1887,31 @@ impl ConnectionPanel {
             (Environment::Production, "Prod"),
         ];
 
-        let mut row = div().flex().flex_row().gap_1();
+        let mut row = h_flex().gap_1();
 
         for (env, label) in environments {
             let is_selected = self.form_environment == env;
             row = row.child(
-                div()
-                    .id(SharedString::from(format!("env-{label}")))
-                    .px_2()
-                    .py(px(2.))
-                    .text_xs()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .when(is_selected, |s| {
-                        s.bg(cx.theme().colors().element_active)
-                            .text_color(cx.theme().colors().text)
-                    })
-                    .when(!is_selected, |s| {
-                        s.text_color(cx.theme().colors().text_muted)
-                            .hover(|s| s.bg(cx.theme().colors().element_active))
+                Button::new(SharedString::from(format!("env-{label}")), label)
+                    .label_size(LabelSize::XSmall)
+                    .style(if is_selected {
+                        ButtonStyle::Filled
+                    } else {
+                        ButtonStyle::Subtle
                     })
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.form_environment = env;
                         cx.notify();
-                    }))
-                    .child(label),
+                    })),
             );
         }
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
+        v_flex()
+            .gap(px(4.))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child("Environment"),
+                Label::new("Environment")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
             )
             .child(row)
     }
@@ -1927,43 +1923,31 @@ impl ConnectionPanel {
             (SslMode::Require, "Require"),
         ];
 
-        let mut row = div().flex().flex_row().gap_1();
+        let mut row = h_flex().gap_1();
 
         for (mode, label) in modes {
             let is_selected = self.form_ssl_mode == mode;
             row = row.child(
-                div()
-                    .id(SharedString::from(format!("ssl-{label}")))
-                    .px_2()
-                    .py(px(2.))
-                    .text_xs()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .when(is_selected, |s| {
-                        s.bg(cx.theme().colors().element_active)
-                            .text_color(cx.theme().colors().text)
-                    })
-                    .when(!is_selected, |s| {
-                        s.text_color(cx.theme().colors().text_muted)
-                            .hover(|s| s.bg(cx.theme().colors().element_active))
+                Button::new(SharedString::from(format!("ssl-{label}")), label)
+                    .label_size(LabelSize::XSmall)
+                    .style(if is_selected {
+                        ButtonStyle::Filled
+                    } else {
+                        ButtonStyle::Subtle
                     })
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.form_ssl_mode = mode;
                         cx.notify();
-                    }))
-                    .child(label),
+                    })),
             );
         }
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
+        v_flex()
+            .gap(px(4.))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child("SSL Mode"),
+                Label::new("SSL Mode")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
             )
             .child(row)
     }
@@ -1972,11 +1956,9 @@ impl ConnectionPanel {
         let ssh_enabled = self.ssh_enabled;
         let ssh_auth = self.ssh_auth.clone();
 
-        let mut section = div().flex().flex_col().gap_2().child(
-            div()
+        let mut section = v_flex().gap_2().child(
+            h_flex()
                 .id("ssh-toggle")
-                .flex()
-                .flex_row()
                 .items_center()
                 .gap_2()
                 .cursor_pointer()
@@ -1986,19 +1968,23 @@ impl ConnectionPanel {
                 }))
                 .child(
                     div()
-                        .w(px(12.))
-                        .h(px(12.))
+                        .w(px(14.))
+                        .h(px(14.))
                         .rounded_sm()
                         .border_1()
                         .border_color(cx.theme().colors().border)
-                        .when(ssh_enabled, |s| s.bg(cx.theme().colors().element_active)),
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(ssh_enabled, |s| {
+                            s.bg(cx.theme().colors().element_active).child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Default),
+                            )
+                        }),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().colors().text)
-                        .child("SSH Tunnel"),
-                ),
+                .child(Label::new("SSH Tunnel").size(LabelSize::Small)),
         );
 
         if self.ssh_enabled {
@@ -2019,85 +2005,58 @@ impl ConnectionPanel {
         let is_agent = matches!(self.ssh_auth, SshAuth::Agent);
         let is_keyfile = matches!(self.ssh_auth, SshAuth::KeyFile { .. });
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
+        v_flex()
+            .gap(px(4.))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
-                    .child("Auth Method"),
+                Label::new("Auth Method")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_row()
+                h_flex()
                     .gap_1()
                     .child(
-                        div()
-                            .id("ssh-auth-agent")
-                            .px_2()
-                            .py(px(2.))
-                            .text_xs()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .when(is_agent, |s| {
-                                s.bg(cx.theme().colors().element_active)
-                                    .text_color(cx.theme().colors().text)
-                            })
-                            .when(!is_agent, |s| {
-                                s.text_color(cx.theme().colors().text_muted)
-                                    .hover(|s| s.bg(cx.theme().colors().element_active))
+                        Button::new("ssh-auth-agent", "Agent")
+                            .label_size(LabelSize::XSmall)
+                            .style(if is_agent {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
                             })
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.ssh_auth = SshAuth::Agent;
                                 cx.notify();
-                            }))
-                            .child("Agent"),
+                            })),
                     )
                     .child(
-                        div()
-                            .id("ssh-auth-keyfile")
-                            .px_2()
-                            .py(px(2.))
-                            .text_xs()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .when(is_keyfile, |s| {
-                                s.bg(cx.theme().colors().element_active)
-                                    .text_color(cx.theme().colors().text)
-                            })
-                            .when(!is_keyfile, |s| {
-                                s.text_color(cx.theme().colors().text_muted)
-                                    .hover(|s| s.bg(cx.theme().colors().element_active))
+                        Button::new("ssh-auth-keyfile", "Key File")
+                            .label_size(LabelSize::XSmall)
+                            .style(if is_keyfile {
+                                ButtonStyle::Filled
+                            } else {
+                                ButtonStyle::Subtle
                             })
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.ssh_auth = SshAuth::KeyFile {
                                     path: String::new(),
                                 };
                                 cx.notify();
-                            }))
-                            .child("Key File"),
+                            })),
                     ),
             )
     }
 
     fn render_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .p_2()
             .gap_2()
             .border_t_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().surface_background)
             .child(
-                div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().colors().text)
-                    .child("New Connection"),
+                Label::new("New Connection")
+                    .size(LabelSize::Small)
+                    .weight(FontWeight::SEMIBOLD),
             )
             .child(self.render_editor_field("Host", &self.host_editor, cx))
             .child(self.render_editor_field("Port", &self.port_editor, cx))
@@ -2108,9 +2067,7 @@ impl ConnectionPanel {
             .child(self.render_ssl_mode_selector(cx))
             .child(self.render_ssh_section(cx))
             .child(
-                div()
-                    .flex()
-                    .flex_row()
+                h_flex()
                     .gap_2()
                     .justify_end()
                     .child(
@@ -2171,18 +2128,22 @@ impl Render for ConnectionPanel {
         // Connection info bar (shown when connected, before schema tree)
         if let Some(profile) = &self.connected_profile {
             panel = panel.child(
-                div()
+                v_flex()
                     .px_2()
                     .py_1()
-                    .flex()
-                    .flex_col()
                     .gap_0p5()
-                    .text_xs()
-                    .text_color(cx.theme().colors().text_muted)
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
-                    .child(format!("{}:{}", profile.host, profile.port))
-                    .child(format!("{} / {}", profile.database, profile.username)),
+                    .child(
+                        Label::new(format!("{}:{}", profile.host, profile.port))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(format!("{} / {}", profile.database, profile.username))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             );
         }
 
