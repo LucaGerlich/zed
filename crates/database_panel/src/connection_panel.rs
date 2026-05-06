@@ -478,6 +478,11 @@ impl ConnectionPanel {
         self.session.clone()
     }
 
+    /// Returns the introspected schema tree, if available.
+    pub fn schema_tree(&self) -> Option<&SchemaTree> {
+        self.schema_tree.as_ref()
+    }
+
     /// Returns the tokio runtime used for database operations.
     pub fn runtime(&self) -> Arc<Runtime> {
         self.runtime.clone()

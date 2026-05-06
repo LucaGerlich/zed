@@ -3,7 +3,7 @@ mod result_panel;
 
 use editor::Editor;
 use editor::actions::SelectAll;
-use gpui::{App, AppContext as _, Context, Entity, Window, actions};
+use gpui::{App, AppContext as _, ClipboardItem, Context, Entity, Window, actions};
 use language;
 use workspace::Workspace;
 
@@ -25,7 +25,11 @@ actions!(
         TableSizes,
         SlowQueries,
         ViewLocks,
-        IndexUsage
+        IndexUsage,
+        ERDiagram,
+        ImportCsv,
+        CompareSchemas,
+        ViewExtensions
     ]
 );
 
@@ -100,6 +104,26 @@ pub fn init(cx: &mut App) {
             // Register the IndexUsage action on the workspace
             workspace.register_action(|workspace, _: &IndexUsage, window, cx| {
                 index_usage_action(workspace, window, cx);
+            });
+
+            // Register the ERDiagram action on the workspace
+            workspace.register_action(|workspace, _: &ERDiagram, window, cx| {
+                er_diagram_action(workspace, window, cx);
+            });
+
+            // Register the ImportCsv action on the workspace
+            workspace.register_action(|workspace, _: &ImportCsv, window, cx| {
+                import_csv_action(workspace, window, cx);
+            });
+
+            // Register the CompareSchemas action on the workspace
+            workspace.register_action(|workspace, _: &CompareSchemas, window, cx| {
+                compare_schemas_action(workspace, window, cx);
+            });
+
+            // Register the ViewExtensions action on the workspace
+            workspace.register_action(|workspace, _: &ViewExtensions, window, cx| {
+                view_extensions_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -530,6 +554,183 @@ fn index_usage_action(workspace: &mut Workspace, window: &mut Window, cx: &mut C
     FROM pg_stat_user_indexes \
     ORDER BY idx_scan ASC, pg_relation_size(indexrelid) DESC \
     LIMIT 30";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Generate a Mermaid ER diagram from the introspected schema tree.
+fn er_diagram_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(schema_tree) = conn_panel.read(cx).schema_tree() else {
+        tracing::warn!("ERDiagram: no schema tree available (not connected or schema not loaded)");
+        return;
+    };
+
+    let mut mermaid = String::from("erDiagram\n");
+
+    for schema in &schema_tree.schemas {
+        // Tables
+        for table in &schema.tables {
+            let table_name = format!("{}_{}", schema.info.name, table.info.name);
+            mermaid.push_str(&format!("    {} {{\n", table_name));
+            for col in &table.columns {
+                let pk = if col.is_primary_key { " PK" } else { "" };
+                let nullable = if col.nullable { " \"nullable\"" } else { "" };
+                let type_name = col.data_type.replace(' ', "_");
+                mermaid.push_str(&format!(
+                    "        {} {}{}{}\n",
+                    type_name, col.name, pk, nullable
+                ));
+            }
+            mermaid.push_str("    }\n");
+        }
+
+        // Relationships from foreign keys
+        for table in &schema.tables {
+            let table_name = format!("{}_{}", schema.info.name, table.info.name);
+            for fk in &table.foreign_keys {
+                let ref_table = if fk.referenced_table.contains('.') {
+                    fk.referenced_table.replace('.', "_")
+                } else {
+                    format!("{}_{}", schema.info.name, fk.referenced_table)
+                };
+                mermaid.push_str(&format!(
+                    "    {} ||--o{{ {} : \"{}\"\n",
+                    ref_table, table_name, fk.name
+                ));
+            }
+        }
+    }
+
+    // Show in result panel
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| {
+            panel.show_ddl(mermaid, cx);
+        });
+    }
+}
+
+/// Import CSV data from the clipboard and generate INSERT statements.
+fn import_csv_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(clipboard) = cx.read_from_clipboard() else {
+        tracing::warn!("ImportCsv: clipboard is empty");
+        return;
+    };
+    let Some(text) = clipboard.text() else {
+        tracing::warn!("ImportCsv: clipboard has no text content");
+        return;
+    };
+    if text.trim().is_empty() {
+        tracing::warn!("ImportCsv: clipboard text is empty");
+        return;
+    }
+
+    let mut lines = text.lines();
+    let Some(header_line) = lines.next() else {
+        return;
+    };
+
+    // Auto-detect delimiter (tab or comma)
+    let delimiter = if header_line.contains('\t') {
+        '\t'
+    } else {
+        ','
+    };
+    let headers: Vec<&str> = header_line.split(delimiter).map(|h| h.trim()).collect();
+
+    let col_list = headers
+        .iter()
+        .map(|h| format!("\"{}\"", h))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut inserts = String::new();
+    inserts.push_str(&format!(
+        "-- Import {} columns: {}\n",
+        headers.len(),
+        col_list
+    ));
+    inserts.push_str("-- Replace 'your_table' with the target table name\n\n");
+
+    let mut row_count = 0;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let values: Vec<&str> = line.split(delimiter).collect();
+        let value_list: Vec<String> = values
+            .iter()
+            .map(|v| {
+                let trimmed = v.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                    "NULL".to_string()
+                } else {
+                    format!("'{}'", trimmed.replace('\'', "''"))
+                }
+            })
+            .collect();
+        inserts.push_str(&format!(
+            "INSERT INTO your_table ({col_list}) VALUES ({});\n",
+            value_list.join(", ")
+        ));
+        row_count += 1;
+    }
+
+    inserts.push_str(&format!("\n-- {row_count} rows imported from clipboard\n"));
+
+    cx.write_to_clipboard(ClipboardItem::new_string(inserts.clone()));
+
+    // Show in result panel
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| {
+            panel.show_ddl(inserts, cx);
+        });
+    }
+}
+
+/// Show schema comparison data: tables with column, index, and FK counts.
+fn compare_schemas_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        t.table_schema, \
+        t.table_name, \
+        (SELECT count(*) FROM information_schema.columns c \
+            WHERE c.table_schema = t.table_schema AND c.table_name = t.table_name) AS column_count, \
+        (SELECT count(*) FROM pg_indexes i \
+            WHERE i.schemaname = t.table_schema AND i.tablename = t.table_name) AS index_count, \
+        (SELECT count(*) FROM information_schema.table_constraints tc \
+            WHERE tc.table_schema = t.table_schema AND tc.table_name = t.table_name \
+            AND tc.constraint_type = 'FOREIGN KEY') AS fk_count \
+    FROM information_schema.tables t \
+    WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema') \
+    AND t.table_type = 'BASE TABLE' \
+    ORDER BY t.table_schema, t.table_name";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show installed PostgreSQL extensions with their versions.
+fn view_extensions_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        e.extname AS name, \
+        e.extversion AS version, \
+        n.nspname AS schema, \
+        c.description \
+    FROM pg_extension e \
+    JOIN pg_namespace n ON n.oid = e.extnamespace \
+    LEFT JOIN pg_description c ON c.objoid = e.oid \
+    ORDER BY e.extname";
 
     execute_system_query(workspace, sql, window, cx);
 }
