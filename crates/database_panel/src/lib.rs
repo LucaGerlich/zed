@@ -34,7 +34,11 @@ actions!(
         ViewExtensions,
         SqlComplete,
         ViewComments,
-        DumpSchema
+        DumpSchema,
+        ViewPrivileges,
+        ViewRoles,
+        ViewTablespaces,
+        ViewReplication
     ]
 );
 
@@ -144,6 +148,26 @@ pub fn init(cx: &mut App) {
             // Register the DumpSchema action on the workspace
             workspace.register_action(|workspace, _: &DumpSchema, window, cx| {
                 dump_schema_action(workspace, window, cx);
+            });
+
+            // Register the ViewPrivileges action on the workspace
+            workspace.register_action(|workspace, _: &ViewPrivileges, window, cx| {
+                view_privileges_action(workspace, window, cx);
+            });
+
+            // Register the ViewRoles action on the workspace
+            workspace.register_action(|workspace, _: &ViewRoles, window, cx| {
+                view_roles_action(workspace, window, cx);
+            });
+
+            // Register the ViewTablespaces action on the workspace
+            workspace.register_action(|workspace, _: &ViewTablespaces, window, cx| {
+                view_tablespaces_action(workspace, window, cx);
+            });
+
+            // Register the ViewReplication action on the workspace
+            workspace.register_action(|workspace, _: &ViewReplication, window, cx| {
+                view_replication_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -810,6 +834,82 @@ fn view_comments_action(
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
         AND col_description(c.oid, a.attnum) IS NOT NULL \
     ORDER BY object_type, object_name";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show table privileges for non-system schemas.
+fn view_privileges_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        grantee, \
+        table_schema, \
+        table_name, \
+        privilege_type, \
+        is_grantable \
+    FROM information_schema.table_privileges \
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+    ORDER BY table_schema, table_name, grantee, privilege_type";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show database roles and their attributes.
+fn view_roles_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "SELECT \
+        rolname AS role, \
+        rolsuper AS superuser, \
+        rolcreaterole AS can_create_role, \
+        rolcreatedb AS can_create_db, \
+        rolcanlogin AS can_login, \
+        rolconnlimit AS conn_limit, \
+        rolvaliduntil AS valid_until \
+    FROM pg_roles \
+    WHERE rolname NOT LIKE 'pg_%' \
+    ORDER BY rolname";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show tablespace information including size and location.
+fn view_tablespaces_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        spcname AS tablespace, \
+        pg_size_pretty(pg_tablespace_size(spcname)) AS size, \
+        spcowner::regrole AS owner, \
+        spclocation AS location \
+    FROM pg_tablespace \
+    ORDER BY spcname";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show replication status for connected replicas.
+fn view_replication_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pid, \
+        usename AS user_name, \
+        application_name AS app, \
+        client_addr AS client, \
+        state, \
+        sent_lsn, \
+        write_lsn, \
+        flush_lsn, \
+        replay_lsn, \
+        sync_state \
+    FROM pg_stat_replication \
+    ORDER BY application_name";
 
     execute_system_query(workspace, sql, window, cx);
 }

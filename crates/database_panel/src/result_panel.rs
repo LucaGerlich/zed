@@ -38,6 +38,12 @@ struct ResultTab {
     state: ResultState,
     sort_column: Option<usize>,
     sort_ascending: bool,
+    /// The SQL that produced this tab's results (for refresh).
+    sql: Option<String>,
+    /// The session used to execute the query (for refresh).
+    session: Option<Arc<dyn DatabaseSession>>,
+    /// The runtime used to execute the query (for refresh).
+    runtime: Option<Arc<Runtime>>,
 }
 
 pub struct ResultPanel {
@@ -57,6 +63,9 @@ impl ResultPanel {
                 state: ResultState::Empty,
                 sort_column: None,
                 sort_ascending: true,
+                sql: None,
+                session: None,
+                runtime: None,
             }],
             active_tab: 0,
         }
@@ -76,6 +85,9 @@ impl ResultPanel {
             state: ResultState::Loading,
             sort_column: None,
             sort_ascending: true,
+            sql: Some(sql.clone()),
+            session: Some(session.clone()),
+            runtime: Some(runtime.clone()),
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -131,6 +143,9 @@ impl ResultPanel {
             },
             sort_column: None,
             sort_ascending: true,
+            sql: None,
+            session: None,
+            runtime: None,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -143,6 +158,9 @@ impl ResultPanel {
             state: ResultState::Ddl(ddl),
             sort_column: None,
             sort_ascending: true,
+            sql: None,
+            session: None,
+            runtime: None,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -161,6 +179,9 @@ impl ResultPanel {
             state: ResultState::Loading,
             sort_column: None,
             sort_ascending: true,
+            sql: None,
+            session: None,
+            runtime: None,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -216,6 +237,75 @@ impl ResultPanel {
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
+        cx.notify();
+    }
+
+    /// Re-execute the query that produced the current tab's results.
+    fn refresh_current_tab(&mut self, cx: &mut Context<Self>) {
+        let tab = &self.tabs[self.active_tab];
+        let Some(sql) = tab.sql.clone() else {
+            return;
+        };
+        let Some(session) = tab.session.clone() else {
+            return;
+        };
+        let Some(runtime) = tab.runtime.clone() else {
+            return;
+        };
+
+        self.tabs[self.active_tab].state = ResultState::Loading;
+        cx.notify();
+
+        let tab_idx = self.active_tab;
+        let started = std::time::Instant::now();
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { session.execute(&sql).await })
+                .await;
+
+            let elapsed = started.elapsed().as_millis();
+
+            this.update(cx, |panel, cx| {
+                if let Some(tab) = panel.tabs.get_mut(tab_idx) {
+                    match result {
+                        Ok(Ok(result_set)) => {
+                            tab.state = ResultState::Success {
+                                columns: result_set.columns,
+                                rows: result_set.rows,
+                                duration_ms: elapsed,
+                            };
+                            tab.sort_column = None;
+                            tab.sort_ascending = true;
+                        }
+                        Ok(Err(e)) => {
+                            tab.state = ResultState::Error(e.to_string());
+                        }
+                        Err(e) => {
+                            tab.state = ResultState::Error(format!("runtime error: {e}"));
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Clear all result tabs and reset to empty state.
+    fn clear_all(&mut self, cx: &mut Context<Self>) {
+        self.tabs.clear();
+        self.tabs.push(ResultTab {
+            label: "Results".to_string(),
+            state: ResultState::Empty,
+            sort_column: None,
+            sort_ascending: true,
+            sql: None,
+            session: None,
+            runtime: None,
+        });
+        self.active_tab = 0;
         cx.notify();
     }
 
@@ -902,6 +992,20 @@ impl ResultPanel {
                     .flex()
                     .flex_row()
                     .gap_1()
+                    .child(
+                        Button::new("refresh-btn", "Refresh")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.refresh_current_tab(cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("clear-btn", "Clear")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.clear_all(cx))),
+                    )
                     .child(
                         Button::new("export-csv", "CSV")
                             .style(ButtonStyle::Subtle)
