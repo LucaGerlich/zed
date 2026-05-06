@@ -346,6 +346,19 @@ fn execute_query_action(
     };
     let Some(session) = conn_panel.read(cx).session() else {
         tracing::warn!("ExecuteQuery: no active database connection");
+        // Show "not connected" message in result panel
+        workspace.open_panel::<ResultPanel>(window, cx);
+        if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+            result_panel.update(cx, |panel, cx| {
+                panel.show_ddl(
+                    "Not connected to a database.\n\n\
+                     Click the database icon in the sidebar to connect,\n\
+                     or press Cmd+Shift+P and type 'Show Shortcuts' for help."
+                        .to_string(),
+                    cx,
+                );
+            });
+        }
         return;
     };
     let runtime = conn_panel.read(cx).runtime();
@@ -406,6 +419,19 @@ fn explain_analyze_action(
     };
     let Some(session) = conn_panel.read(cx).session() else {
         tracing::warn!("ExplainAnalyze: no active database connection");
+        // Show "not connected" message in result panel
+        workspace.open_panel::<ResultPanel>(window, cx);
+        if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+            result_panel.update(cx, |panel, cx| {
+                panel.show_ddl(
+                    "Not connected to a database.\n\n\
+                     Click the database icon in the sidebar to connect,\n\
+                     or press Cmd+Shift+P and type 'Show Shortcuts' for help."
+                        .to_string(),
+                    cx,
+                );
+            });
+        }
         return;
     };
     let runtime = conn_panel.read(cx).runtime();

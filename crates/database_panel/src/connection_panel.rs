@@ -70,6 +70,8 @@ pub struct ConnectionPanel {
     error_message: Option<String>,
     // When editing an existing connection, holds the original ID
     editing_connection_id: Option<pgblade_core::connection::ConnectionId>,
+    // Timestamp when the current connection was established
+    connected_at: Option<std::time::Instant>,
 }
 
 impl ConnectionPanel {
@@ -182,6 +184,7 @@ impl ConnectionPanel {
             workspace,
             error_message: None,
             editing_connection_id: None,
+            connected_at: None,
         }
     }
 
@@ -293,6 +296,60 @@ impl ConnectionPanel {
 
         // Connect to the database
         self.connect(profile, password, cx);
+    }
+
+    fn test_connection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host_editor.read(cx).text(cx);
+        let port_str = self.port_editor.read(cx).text(cx);
+        let database = self.database_editor.read(cx).text(cx);
+        let username = self.username_editor.read(cx).text(cx);
+        let password = self.password_editor.read(cx).text(cx);
+
+        let profile = ConnectionProfile {
+            id: pgblade_core::connection::ConnectionId::new(),
+            name: "test".to_string(),
+            host,
+            port: port_str.parse().unwrap_or(5432),
+            database,
+            username,
+            environment: self.form_environment,
+            ssl_mode: self.form_ssl_mode,
+            read_only_default: false,
+            ssh: SshConfig::default(),
+        };
+
+        let driver = self.driver.clone();
+        let runtime = self.runtime.clone();
+
+        self.error_message = Some("Testing connection...".to_string());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { driver.connect(&profile, &password).await })
+                .await;
+
+            this.update(cx, |panel, cx| {
+                match result {
+                    Ok(Ok(session)) => {
+                        let version = session.server_version().to_string();
+                        panel.error_message =
+                            Some(format!("Connection successful! Server: {version}"));
+                        // Don't store the session -- just testing
+                        drop(session);
+                    }
+                    Ok(Err(e)) => {
+                        panel.error_message = Some(format!("Connection failed: {e}"));
+                    }
+                    Err(e) => {
+                        panel.error_message = Some(format!("Runtime error: {e}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn connect_saved(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
@@ -420,6 +477,7 @@ impl ConnectionPanel {
                     this.update(cx, |panel, cx| {
                         panel.session = Some(session);
                         panel.connected_profile = Some(profile);
+                        panel.connected_at = Some(std::time::Instant::now());
                         tracing::info!("database connection established");
                         cx.emit(PanelEvent::Activate);
                         cx.notify();
@@ -597,6 +655,7 @@ impl ConnectionPanel {
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.session = None;
         self.connected_profile = None;
+        self.connected_at = None;
         self.ssh_tunnel = None;
         self.schema_tree = None;
         self.expanded_nodes.clear();
@@ -1835,22 +1894,26 @@ impl ConnectionPanel {
 
         if self.saved_connections.is_empty() {
             list = list.child(
-                div()
-                    .px_2()
-                    .py_4()
-                    .flex()
-                    .flex_col()
+                v_flex()
+                    .size_full()
                     .items_center()
-                    .gap_1()
+                    .justify_center()
+                    .py_4()
+                    .gap_2()
                     .child(
                         Icon::new(IconName::DatabaseZap)
                             .size(IconSize::Medium)
                             .color(Color::Muted),
                     )
                     .child(
-                        Label::new("No connections yet")
-                            .size(LabelSize::Small)
+                        Label::new("No connections")
+                            .size(LabelSize::Default)
                             .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("Click + to add a PostgreSQL connection")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Disabled),
                     ),
             );
         }
@@ -2216,6 +2279,15 @@ impl ConnectionPanel {
                             })),
                     )
                     .child(
+                        Button::new("test-connection", "Test")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .tooltip(Tooltip::text("Test connection without saving"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.test_connection(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("save-connect", save_label)
                             .style(ButtonStyle::Filled)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2245,25 +2317,61 @@ impl Render for ConnectionPanel {
             .overflow_hidden()
             .child(self.render_header(cx));
 
-        // Show error message if present
-        if let Some(error) = &self.error_message {
+        // Show error/success message if present
+        if let Some(msg) = &self.error_message {
+            let is_success = msg.starts_with("Connection successful") || msg.starts_with("Testing");
+            let bg = if is_success {
+                cx.theme().status().success_background
+            } else {
+                cx.theme().status().error_background
+            };
+            let border = if is_success {
+                cx.theme().status().success_border
+            } else {
+                cx.theme().status().error_border
+            };
+            let text_color = if is_success {
+                cx.theme().status().success
+            } else {
+                cx.theme().status().error
+            };
             panel = panel.child(
                 div()
                     .mx_2()
                     .mb_2()
                     .p_2()
                     .rounded_sm()
-                    .bg(cx.theme().status().error_background)
+                    .bg(bg)
                     .border_1()
-                    .border_color(cx.theme().status().error_border)
+                    .border_color(border)
                     .text_xs()
-                    .text_color(cx.theme().status().error)
-                    .child(error.clone()),
+                    .text_color(text_color)
+                    .child(msg.clone()),
             );
         }
 
         // Connection info bar (shown when connected, before schema tree)
         if let Some(profile) = &self.connected_profile {
+            let uptime = self
+                .connected_at
+                .map(|t| {
+                    let secs = t.elapsed().as_secs();
+                    if secs < 60 {
+                        format!("{}s", secs)
+                    } else if secs < 3600 {
+                        format!("{}m", secs / 60)
+                    } else {
+                        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+                    }
+                })
+                .unwrap_or_default();
+
+            let host_line = if uptime.is_empty() {
+                format!("{}:{}", profile.host, profile.port)
+            } else {
+                format!("{}:{} | {}", profile.host, profile.port, uptime)
+            };
+
             panel = panel.child(
                 v_flex()
                     .px_2()
@@ -2272,7 +2380,7 @@ impl Render for ConnectionPanel {
                     .border_b_1()
                     .border_color(cx.theme().colors().border)
                     .child(
-                        Label::new(format!("{}:{}", profile.host, profile.port))
+                        Label::new(host_line)
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
