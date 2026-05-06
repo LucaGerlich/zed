@@ -654,6 +654,50 @@ impl ConnectionPanel {
         }
     }
 
+    /// Execute a SQL statement in the result panel (shared helper for table actions).
+    fn execute_in_result_panel(&self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+        let sql = sql.to_string();
+
+        if let Some(workspace) = self.workspace.upgrade() {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_panel::<ResultPanel>(window, cx);
+                if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+                    result_panel.update(cx, |panel, cx| {
+                        panel.execute_query(sql, session, runtime, cx);
+                    });
+                }
+            });
+        }
+    }
+
+    /// Run SELECT COUNT(*) for a table and show the result.
+    fn count_table(&self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let sql = format!("SELECT COUNT(*) AS row_count FROM \"{schema}\".\"{table}\"");
+        self.execute_in_result_panel(&sql, window, cx);
+    }
+
+    /// Run TRUNCATE TABLE for a table.
+    fn truncate_table(
+        &self,
+        schema: &str,
+        table: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sql = format!("TRUNCATE TABLE \"{schema}\".\"{table}\"");
+        self.execute_in_result_panel(&sql, window, cx);
+    }
+
+    /// Run ANALYZE for a table (VACUUM cannot run inside a transaction).
+    fn vacuum_table(&self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let sql = format!("ANALYZE \"{schema}\".\"{table}\"");
+        self.execute_in_result_panel(&sql, window, cx);
+    }
+
     /// Show DDL for a table by finding it in the schema tree and generating the statement.
     fn show_ddl(&self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tree) = &self.schema_tree else {
@@ -861,6 +905,9 @@ impl ConnectionPanel {
         let sql_id = SharedString::from(format!("sql-{node_id}"));
         let ins_id = SharedString::from(format!("ins-{node_id}"));
         let upd_id = SharedString::from(format!("upd-{node_id}"));
+        let cnt_id = SharedString::from(format!("cnt-{node_id}"));
+        let trunc_id = SharedString::from(format!("trunc-{node_id}"));
+        let vac_id = SharedString::from(format!("vac-{node_id}"));
         let node_id_owned = node_id.to_string();
         let schema_owned = schema_name.to_string();
         let table_owned = table_name.to_string();
@@ -874,6 +921,12 @@ impl ConnectionPanel {
         let schema_for_upd = schema_name.to_string();
         let table_for_upd = table_name.to_string();
         let cols_for_upd = columns.to_vec();
+        let schema_for_cnt = schema_name.to_string();
+        let table_for_cnt = table_name.to_string();
+        let schema_for_trunc = schema_name.to_string();
+        let table_for_trunc = table_name.to_string();
+        let schema_for_vac = schema_name.to_string();
+        let table_for_vac = table_name.to_string();
 
         div()
             .id(id)
@@ -959,6 +1012,7 @@ impl ConnectionPanel {
                 div()
                     .id(ddl_id)
                     .text_xs()
+                    .mr_1()
                     .text_color(cx.theme().colors().text_disabled)
                     .hover(|s| s.text_color(cx.theme().colors().text))
                     .cursor_pointer()
@@ -966,6 +1020,44 @@ impl ConnectionPanel {
                         this.show_ddl(&schema_for_ddl, &table_for_ddl, window, cx);
                     }))
                     .child("DDL"),
+            )
+            .child(
+                div()
+                    .id(cnt_id)
+                    .text_xs()
+                    .mr_1()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.count_table(&schema_for_cnt, &table_for_cnt, window, cx);
+                    }))
+                    .child("CNT"),
+            )
+            .child(
+                div()
+                    .id(trunc_id)
+                    .text_xs()
+                    .mr_1()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(gpui::red()))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.truncate_table(&schema_for_trunc, &table_for_trunc, window, cx);
+                    }))
+                    .child("TRC"),
+            )
+            .child(
+                div()
+                    .id(vac_id)
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.vacuum_table(&schema_for_vac, &table_for_vac, window, cx);
+                    }))
+                    .child("VAC"),
             )
             .into_any_element()
     }

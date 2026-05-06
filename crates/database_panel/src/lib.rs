@@ -20,7 +20,12 @@ actions!(
         ViewHistory,
         Disconnect,
         KillBackend,
-        SearchObjects
+        SearchObjects,
+        DatabaseInfo,
+        TableSizes,
+        SlowQueries,
+        ViewLocks,
+        IndexUsage
     ]
 );
 
@@ -70,6 +75,31 @@ pub fn init(cx: &mut App) {
             // Register the SearchObjects action on the workspace
             workspace.register_action(|workspace, _: &SearchObjects, window, cx| {
                 search_objects_action(workspace, window, cx);
+            });
+
+            // Register the DatabaseInfo action on the workspace
+            workspace.register_action(|workspace, _: &DatabaseInfo, window, cx| {
+                database_info_action(workspace, window, cx);
+            });
+
+            // Register the TableSizes action on the workspace
+            workspace.register_action(|workspace, _: &TableSizes, window, cx| {
+                table_sizes_action(workspace, window, cx);
+            });
+
+            // Register the SlowQueries action on the workspace
+            workspace.register_action(|workspace, _: &SlowQueries, window, cx| {
+                slow_queries_action(workspace, window, cx);
+            });
+
+            // Register the ViewLocks action on the workspace
+            workspace.register_action(|workspace, _: &ViewLocks, window, cx| {
+                view_locks_action(workspace, window, cx);
+            });
+
+            // Register the IndexUsage action on the workspace
+            workspace.register_action(|workspace, _: &IndexUsage, window, cx| {
+                index_usage_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -400,4 +430,106 @@ fn kill_backend_action(
 
     let sql = format!("SELECT pg_terminate_backend({pid})");
     execute_system_query(workspace, &sql, window, cx);
+}
+
+/// Show database-level statistics (size, connections, collation).
+fn database_info_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pg_database.datname AS database, \
+        pg_size_pretty(pg_database_size(pg_database.datname)) AS size, \
+        (SELECT count(*) FROM pg_stat_activity WHERE datname = pg_database.datname) AS connections, \
+        pg_database.datcollate AS collation, \
+        pg_database.encoding AS encoding_id \
+    FROM pg_database \
+    WHERE datistemplate = false \
+    ORDER BY pg_database_size(pg_database.datname) DESC";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show table sizes ordered by total size descending.
+fn table_sizes_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "SELECT \
+        schemaname || '.' || tablename AS table_name, \
+        pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size, \
+        pg_size_pretty(pg_relation_size(schemaname || '.' || tablename)) AS data_size, \
+        pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename) - pg_relation_size(schemaname || '.' || tablename)) AS index_size, \
+        (SELECT reltuples::bigint FROM pg_class WHERE relname = tablename) AS estimated_rows \
+    FROM pg_tables \
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+    ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC \
+    LIMIT 50";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show currently running (non-idle) queries ordered by duration.
+fn slow_queries_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pid, \
+        now() - pg_stat_activity.query_start AS duration, \
+        state, \
+        usename AS user, \
+        datname AS database, \
+        LEFT(query, 300) AS query \
+    FROM pg_stat_activity \
+    WHERE state != 'idle' \
+        AND query NOT ILIKE '%pg_stat_activity%' \
+    ORDER BY duration DESC \
+    LIMIT 20";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show blocked and blocking queries (lock contention).
+fn view_locks_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "SELECT \
+        blocked_locks.pid AS blocked_pid, \
+        blocked_activity.usename AS blocked_user, \
+        LEFT(blocked_activity.query, 200) AS blocked_query, \
+        blocking_locks.pid AS blocking_pid, \
+        blocking_activity.usename AS blocking_user, \
+        LEFT(blocking_activity.query, 200) AS blocking_query \
+    FROM pg_catalog.pg_locks blocked_locks \
+    JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid \
+    JOIN pg_catalog.pg_locks blocking_locks ON blocking_locks.locktype = blocked_locks.locktype \
+        AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database \
+        AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation \
+        AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page \
+        AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple \
+        AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid \
+        AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid \
+        AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid \
+        AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid \
+        AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid \
+        AND blocking_locks.pid != blocked_locks.pid \
+    JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid \
+    WHERE NOT blocked_locks.granted \
+    ORDER BY blocked_activity.query_start";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show index usage statistics sorted by least-used indexes.
+fn index_usage_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "SELECT \
+        schemaname || '.' || relname AS table, \
+        indexrelname AS index, \
+        idx_scan AS scans, \
+        pg_size_pretty(pg_relation_size(indexrelid)) AS size, \
+        idx_tup_read AS tuples_read, \
+        idx_tup_fetch AS tuples_fetched \
+    FROM pg_stat_user_indexes \
+    ORDER BY idx_scan ASC, pg_relation_size(indexrelid) DESC \
+    LIMIT 30";
+
+    execute_system_query(workspace, sql, window, cx);
 }
