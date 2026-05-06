@@ -38,7 +38,11 @@ actions!(
         ViewPrivileges,
         ViewRoles,
         ViewTablespaces,
-        ViewReplication
+        ViewReplication,
+        ViewDefinition,
+        ColumnStats,
+        VacuumProgress,
+        CacheHitRatio
     ]
 );
 
@@ -168,6 +172,26 @@ pub fn init(cx: &mut App) {
             // Register the ViewReplication action on the workspace
             workspace.register_action(|workspace, _: &ViewReplication, window, cx| {
                 view_replication_action(workspace, window, cx);
+            });
+
+            // Register the ViewDefinition action on the workspace
+            workspace.register_action(|workspace, _: &ViewDefinition, window, cx| {
+                view_definition_action(workspace, window, cx);
+            });
+
+            // Register the ColumnStats action on the workspace
+            workspace.register_action(|workspace, _: &ColumnStats, window, cx| {
+                column_stats_action(workspace, window, cx);
+            });
+
+            // Register the VacuumProgress action on the workspace
+            workspace.register_action(|workspace, _: &VacuumProgress, window, cx| {
+                vacuum_progress_action(workspace, window, cx);
+            });
+
+            // Register the CacheHitRatio action on the workspace
+            workspace.register_action(|workspace, _: &CacheHitRatio, window, cx| {
+                cache_hit_ratio_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -981,4 +1005,121 @@ fn dump_schema_action(workspace: &mut Workspace, window: &mut Window, cx: &mut C
             panel.show_ddl(ddl, cx);
         });
     }
+}
+
+/// Show the SQL definition of a view or materialized view.
+/// Reads the view name from the selected text in the active editor.
+fn view_definition_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let view_name = selected.trim();
+    let safe_name = view_name.replace('\'', "''");
+
+    let sql = format!(
+        "SELECT definition FROM pg_views WHERE viewname = '{safe_name}' \
+         UNION ALL \
+         SELECT definition FROM pg_matviews WHERE matviewname = '{safe_name}'"
+    );
+    execute_system_query(workspace, &sql, window, cx);
+}
+
+/// Show column-level statistics from pg_stats for a table.
+/// Reads the table name from the selected text in the active editor.
+fn column_stats_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table_name = selected.trim().replace('\'', "''");
+
+    let sql = format!(
+        "SELECT \
+            attname AS column, \
+            n_distinct, \
+            most_common_vals::text AS common_values, \
+            most_common_freqs::text AS common_frequencies, \
+            null_frac AS null_fraction, \
+            avg_width \
+        FROM pg_stats \
+        WHERE tablename = '{table_name}' \
+        ORDER BY attname"
+    );
+    execute_system_query(workspace, &sql, window, cx);
+}
+
+/// Show the progress of any currently running VACUUM operations.
+fn vacuum_progress_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        p.pid, \
+        a.datname AS database, \
+        t.relname AS table_name, \
+        p.phase, \
+        p.heap_blks_total, \
+        p.heap_blks_scanned, \
+        p.heap_blks_vacuumed, \
+        CASE WHEN p.heap_blks_total > 0 \
+            THEN round(100.0 * p.heap_blks_vacuumed / p.heap_blks_total, 1) \
+            ELSE 0 \
+        END AS progress_pct \
+    FROM pg_stat_progress_vacuum p \
+    JOIN pg_stat_activity a ON a.pid = p.pid \
+    JOIN pg_class t ON t.oid = p.relid \
+    ORDER BY p.pid";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show cache hit ratios for indexes, tables, and the overall database.
+fn cache_hit_ratio_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        'index hit rate' AS metric, \
+        CASE WHEN (sum(idx_blks_hit) + sum(idx_blks_read)) > 0 \
+            THEN round(sum(idx_blks_hit) / (sum(idx_blks_hit) + sum(idx_blks_read))::numeric, 4) \
+            ELSE 0 END AS ratio \
+    FROM pg_statio_user_indexes \
+    UNION ALL \
+    SELECT \
+        'table hit rate', \
+        CASE WHEN (sum(heap_blks_hit) + sum(heap_blks_read)) > 0 \
+            THEN round(sum(heap_blks_hit) / (sum(heap_blks_hit) + sum(heap_blks_read))::numeric, 4) \
+            ELSE 0 END \
+    FROM pg_statio_user_tables \
+    UNION ALL \
+    SELECT \
+        'total hit rate', \
+        CASE WHEN (sum(blks_hit) + sum(blks_read)) > 0 \
+            THEN round(sum(blks_hit) / (sum(blks_hit) + sum(blks_read))::numeric, 4) \
+            ELSE 0 END \
+    FROM pg_stat_database \
+    WHERE datname = current_database()";
+
+    execute_system_query(workspace, sql, window, cx);
 }

@@ -740,6 +740,36 @@ impl ConnectionPanel {
         }
     }
 
+    /// Show the SQL definition of a view or materialized view.
+    fn show_view_definition(&self, view_name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let safe_name = view_name.replace('\'', "''");
+        let sql = format!(
+            "SELECT definition FROM pg_views WHERE viewname = '{safe_name}' \
+             UNION ALL \
+             SELECT definition FROM pg_matviews WHERE matviewname = '{safe_name}'"
+        );
+        self.execute_in_result_panel(&sql, window, cx);
+    }
+
+    /// Show the source code of a stored function.
+    fn show_function_source(
+        &self,
+        func_name: &str,
+        schema: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let safe_name = func_name.replace('\'', "''");
+        let safe_schema = schema.replace('\'', "''");
+        let sql = format!(
+            "SELECT pg_get_functiondef(p.oid) AS definition \
+             FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE p.proname = '{safe_name}' AND n.nspname = '{safe_schema}'"
+        );
+        self.execute_in_result_panel(&sql, window, cx);
+    }
+
     /// Generate CREATE TABLE DDL from introspected schema information.
     pub fn generate_ddl(table: &TableEntry) -> String {
         let kind_keyword = match table.info.kind {
@@ -890,6 +920,53 @@ impl ConnectionPanel {
             .into_any_element()
     }
 
+    /// Render a function row with a SRC button that fetches the function source code.
+    fn render_function_row(
+        &self,
+        node_id: &str,
+        label: &str,
+        func_name: &str,
+        schema_name: &str,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let indent = depth as f32 * 12.0;
+
+        let id = SharedString::from(format!("tree-{node_id}"));
+        let src_id = SharedString::from(format!("src-{node_id}"));
+        let func_for_src = func_name.to_string();
+        let schema_for_src = schema_name.to_string();
+
+        div()
+            .id(id)
+            .h(px(22.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .pl(px(indent + 4.0))
+            .pr_1()
+            .text_xs()
+            .text_color(cx.theme().colors().text)
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
+            .child(div().text_color(cx.theme().colors().text_muted).child("  "))
+            .child(div().flex_1().child(label.to_string()))
+            .child(
+                div()
+                    .id(src_id)
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .px_1()
+                    .rounded_sm()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_function_source(&func_for_src, &schema_for_src, window, cx);
+                    }))
+                    .child("SRC"),
+            )
+            .into_any_element()
+    }
+
     /// Format a number with K/M suffixes for display.
     fn format_number(n: i64) -> String {
         if n >= 1_000_000 {
@@ -903,12 +980,14 @@ impl ConnectionPanel {
 
     /// Render a table row that expands on click AND triggers data preview.
     /// Also includes DDL, SQL, INS, and UPD buttons visible on hover.
+    /// For views/materialized views, a DEF button is shown to fetch the view definition.
     fn render_table_row(
         &self,
         node_id: &str,
         table_name: &str,
         schema_name: &str,
         columns: &[String],
+        kind: TableKind,
         depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -924,6 +1003,7 @@ impl ConnectionPanel {
         let cnt_id = SharedString::from(format!("cnt-{node_id}"));
         let trunc_id = SharedString::from(format!("trunc-{node_id}"));
         let vac_id = SharedString::from(format!("vac-{node_id}"));
+        let def_id = SharedString::from(format!("def-{node_id}"));
         let node_id_owned = node_id.to_string();
         let schema_owned = schema_name.to_string();
         let table_owned = table_name.to_string();
@@ -943,8 +1023,10 @@ impl ConnectionPanel {
         let table_for_trunc = table_name.to_string();
         let schema_for_vac = schema_name.to_string();
         let table_for_vac = table_name.to_string();
+        let table_for_def = table_name.to_string();
+        let show_def_button = matches!(kind, TableKind::View | TableKind::MaterializedView);
 
-        div()
+        let mut row = div()
             .id(id)
             .h(px(22.))
             .flex()
@@ -1036,7 +1118,26 @@ impl ConnectionPanel {
                         this.show_ddl(&schema_for_ddl, &table_for_ddl, window, cx);
                     }))
                     .child("DDL"),
-            )
+            );
+
+        // DEF button for views and materialized views
+        if show_def_button {
+            row = row.child(
+                div()
+                    .id(def_id)
+                    .text_xs()
+                    .mr_1()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_view_definition(&table_for_def, window, cx);
+                    }))
+                    .child("DEF"),
+            );
+        }
+
+        row = row
             .child(
                 div()
                     .id(cnt_id)
@@ -1074,8 +1175,9 @@ impl ConnectionPanel {
                         this.vacuum_table(&schema_for_vac, &table_for_vac, window, cx);
                     }))
                     .child("VAC"),
-            )
-            .into_any_element()
+            );
+
+        row.into_any_element()
     }
 
     fn render_table_entry(
@@ -1099,7 +1201,15 @@ impl ConnectionPanel {
             .map(|r| format!(" (~{})", Self::format_number(r)))
             .unwrap_or_default();
         let label = format!("{}{}", table.info.name, row_estimate);
-        rows.push(self.render_table_row(&table_id, &label, schema_name, &col_names, depth, cx));
+        rows.push(self.render_table_row(
+            &table_id,
+            &label,
+            schema_name,
+            &col_names,
+            table.info.kind,
+            depth,
+            cx,
+        ));
 
         if self.is_expanded(&table_id) {
             // Columns
@@ -1312,11 +1422,12 @@ impl ConnectionPanel {
                                     "{}({}) -> {}",
                                     func.name, func.arguments, func.return_type
                                 );
-                                rows.push(self.render_tree_row(
+                                rows.push(self.render_function_row(
                                     &format!("func:{}.{}", schema.info.name, func.name),
                                     &label,
+                                    &func.name,
+                                    &schema.info.name,
                                     4,
-                                    false,
                                     cx,
                                 ));
                             }
