@@ -512,10 +512,18 @@ impl ConnectionPanel {
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.session = None;
         self.connected_profile = None;
-        self.ssh_tunnel = None; // Kills the SSH process via Drop
+        self.ssh_tunnel = None;
         self.schema_tree = None;
         self.expanded_nodes.clear();
         self.error_message = None;
+        self.show_form = false;
+        self.ssh_enabled = false;
+        // Reload saved connections so the list is fresh
+        self.saved_connections = self.storage.load_connections().unwrap_or_default();
+        tracing::info!(
+            "disconnected, {} saved connections available",
+            self.saved_connections.len()
+        );
         cx.notify();
     }
 
