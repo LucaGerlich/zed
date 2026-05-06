@@ -327,6 +327,66 @@ impl ResultPanel {
         cx.write_to_clipboard(ClipboardItem::new_string(sql));
     }
 
+    /// Format a CellValue as a SQL literal for use in generated statements.
+    fn cell_to_sql_literal(cell: &CellValue) -> String {
+        match cell {
+            CellValue::Null => "NULL".to_string(),
+            CellValue::Boolean(b) => b.to_string(),
+            CellValue::Integer(n) => n.to_string(),
+            CellValue::Float(f) => f.to_string(),
+            v => format!("'{}'", v.display().replace('\'', "''")),
+        }
+    }
+
+    /// Export current result set as UPDATE statements to clipboard.
+    fn export_update(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+            return;
+        };
+
+        let mut sql =
+            String::from("-- No source table info. Replace 'your_table' and add WHERE clause.\n\n");
+        for row in rows {
+            let sets: Vec<String> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let val = Self::cell_to_sql_literal(&row[i]);
+                    format!("    \"{}\" = {}", c.name, val)
+                })
+                .collect();
+            sql.push_str(&format!(
+                "UPDATE your_table SET\n{}\nWHERE /* condition */;\n\n",
+                sets.join(",\n")
+            ));
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(sql));
+    }
+
+    /// Export current result set as DELETE statements to clipboard.
+    fn export_delete(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+            return;
+        };
+
+        let mut sql = String::new();
+        for row in rows {
+            let where_parts: Vec<String> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, c)| match &row[i] {
+                    CellValue::Null => format!("\"{}\" IS NULL", c.name),
+                    v => format!("\"{}\" = '{}'", c.name, v.display().replace('\'', "''")),
+                })
+                .collect();
+            sql.push_str(&format!(
+                "DELETE FROM your_table\nWHERE\n    {};\n\n",
+                where_parts.join("\n    AND ")
+            ));
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(sql));
+    }
+
     /// Return rows sorted by the currently selected column, or in original
     /// order when no sort column is active.
     fn sorted_rows(&self, rows: &[Vec<CellValue>]) -> Vec<Vec<CellValue>> {
@@ -859,6 +919,18 @@ impl ResultPanel {
                             .style(ButtonStyle::Subtle)
                             .label_size(LabelSize::XSmall)
                             .on_click(cx.listener(|this, _, _window, cx| this.export_insert(cx))),
+                    )
+                    .child(
+                        Button::new("export-update", "UPDATE")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.export_update(cx))),
+                    )
+                    .child(
+                        Button::new("export-delete", "DELETE")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::XSmall)
+                            .on_click(cx.listener(|this, _, _window, cx| this.export_delete(cx))),
                     ),
             )
     }

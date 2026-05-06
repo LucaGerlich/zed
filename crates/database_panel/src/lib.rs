@@ -32,7 +32,9 @@ actions!(
         ImportCsv,
         CompareSchemas,
         ViewExtensions,
-        SqlComplete
+        SqlComplete,
+        ViewComments,
+        DumpSchema
     ]
 );
 
@@ -132,6 +134,16 @@ pub fn init(cx: &mut App) {
             // Register the SqlComplete action on the workspace
             workspace.register_action(|workspace, _: &SqlComplete, window, cx| {
                 sql_complete_action(workspace, window, cx);
+            });
+
+            // Register the ViewComments action on the workspace
+            workspace.register_action(|workspace, _: &ViewComments, window, cx| {
+                view_comments_action(workspace, window, cx);
+            });
+
+            // Register the DumpSchema action on the workspace
+            workspace.register_action(|workspace, _: &DumpSchema, window, cx| {
+                dump_schema_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -766,4 +778,107 @@ fn sql_complete_action(
         let delegate = sql_completion::SqlCompletionDelegate::new(items, workspace_weak);
         Picker::uniform_list(delegate, window, cx)
     });
+}
+
+/// Show all table and column comments from the connected database.
+fn view_comments_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        c.relname AS object_name, \
+        CASE c.relkind \
+            WHEN 'r' THEN 'table' \
+            WHEN 'v' THEN 'view' \
+            WHEN 'm' THEN 'materialized view' \
+            WHEN 'S' THEN 'sequence' \
+        END AS object_type, \
+        obj_description(c.oid) AS comment \
+    FROM pg_class c \
+    JOIN pg_namespace n ON n.oid = c.relnamespace \
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
+        AND obj_description(c.oid) IS NOT NULL \
+    UNION ALL \
+    SELECT \
+        c.relname || '.' || a.attname, \
+        'column', \
+        col_description(c.oid, a.attnum) \
+    FROM pg_class c \
+    JOIN pg_namespace n ON n.oid = c.relnamespace \
+    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
+        AND col_description(c.oid, a.attnum) IS NOT NULL \
+    ORDER BY object_type, object_name";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Generate a full DDL dump for all schemas in the schema tree.
+fn dump_schema_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(schema_tree) = conn_panel.read(cx).schema_tree() else {
+        tracing::warn!("DumpSchema: no schema tree available (not connected or schema not loaded)");
+        return;
+    };
+
+    let mut ddl = String::new();
+    ddl.push_str("-- PgBlade Schema Dump\n");
+    ddl.push_str(&format!(
+        "-- Generated: {}\n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ));
+
+    for schema in &schema_tree.schemas {
+        ddl.push_str(&format!("-- Schema: {}\n\n", schema.info.name));
+
+        // Sequences first
+        for seq in &schema.sequences {
+            ddl.push_str(&format!(
+                "CREATE SEQUENCE IF NOT EXISTS \"{}\".\"{}\";\n\n",
+                schema.info.name, seq.name
+            ));
+        }
+
+        // Tables
+        for table in &schema.tables {
+            ddl.push_str(&ConnectionPanel::generate_ddl(table));
+            ddl.push('\n');
+
+            // Indexes (already included in generate_ddl, but add schema-qualified IF NOT EXISTS)
+            for idx in &table.indexes {
+                let unique = if idx.is_unique { "UNIQUE " } else { "" };
+                let cols = idx
+                    .columns
+                    .iter()
+                    .map(|c| format!("\"{}\"", c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                ddl.push_str(&format!(
+                    "CREATE {unique}INDEX IF NOT EXISTS \"{}\" ON \"{}\".\"{}\" USING {} ({cols});\n",
+                    idx.name, schema.info.name, table.info.name, idx.index_type
+                ));
+            }
+            ddl.push('\n');
+        }
+
+        // Views
+        for view in &schema.views {
+            ddl.push_str(&format!(
+                "-- View: {}.{}\n",
+                schema.info.name, view.info.name
+            ));
+            ddl.push_str("-- (View definition not available from introspection)\n\n");
+        }
+    }
+
+    // Show in result panel
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| {
+            panel.show_ddl(ddl, cx);
+        });
+    }
 }

@@ -741,7 +741,7 @@ impl ConnectionPanel {
     }
 
     /// Generate CREATE TABLE DDL from introspected schema information.
-    fn generate_ddl(table: &TableEntry) -> String {
+    pub fn generate_ddl(table: &TableEntry) -> String {
         let kind_keyword = match table.info.kind {
             TableKind::View => "VIEW",
             TableKind::MaterializedView => "MATERIALIZED VIEW",
@@ -888,6 +888,17 @@ impl ConnectionPanel {
             )
             .child(label.to_string())
             .into_any_element()
+    }
+
+    /// Format a number with K/M suffixes for display.
+    fn format_number(n: i64) -> String {
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1_000_000.0)
+        } else if n >= 1_000 {
+            format!("{:.1}K", n as f64 / 1_000.0)
+        } else {
+            n.to_string()
+        }
     }
 
     /// Render a table row that expands on click AND triggers data preview.
@@ -1082,14 +1093,13 @@ impl ConnectionPanel {
             .iter()
             .map(|c| format!("\"{}\"", c.name))
             .collect();
-        rows.push(self.render_table_row(
-            &table_id,
-            &table.info.name,
-            schema_name,
-            &col_names,
-            depth,
-            cx,
-        ));
+        let row_estimate = table
+            .info
+            .row_estimate
+            .map(|r| format!(" (~{})", Self::format_number(r)))
+            .unwrap_or_default();
+        let label = format!("{}{}", table.info.name, row_estimate);
+        rows.push(self.render_table_row(&table_id, &label, schema_name, &col_names, depth, cx));
 
         if self.is_expanded(&table_id) {
             // Columns
@@ -1829,6 +1839,24 @@ impl Render for ConnectionPanel {
                     .text_xs()
                     .text_color(cx.theme().status().error)
                     .child(error.clone()),
+            );
+        }
+
+        // Connection info bar (shown when connected, before schema tree)
+        if let Some(profile) = &self.connected_profile {
+            panel = panel.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_muted)
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(format!("{}:{}", profile.host, profile.port))
+                    .child(format!("{} / {}", profile.database, profile.username)),
             );
         }
 
