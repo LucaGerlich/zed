@@ -560,13 +560,14 @@ impl ConnectionPanel {
         };
         let runtime = self.runtime.clone();
         let sql = format!("SELECT * FROM \"{schema}\".\"{table}\" LIMIT 100");
+        let source_table = Some((schema.to_string(), table.to_string()));
 
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
                 workspace.open_panel::<ResultPanel>(window, cx);
                 if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
                     result_panel.update(cx, |panel, cx| {
-                        panel.execute_query(sql, session, runtime, cx);
+                        panel.execute_query_with_source(sql, session, runtime, source_table, cx);
                     });
                 }
             });
@@ -585,19 +586,19 @@ impl ConnectionPanel {
 
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
-                if let Some(active_item) = workspace.active_item(cx) {
-                    if let Some(editor) = active_item.act_as::<Editor>(cx) {
-                        editor.update(cx, |editor, cx| {
-                            let text = editor.text(cx);
-                            let insert_text = if text.is_empty() {
-                                sql
-                            } else {
-                                format!("\n\n{sql}")
-                            };
-                            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
-                            editor.insert(&insert_text, window, cx);
-                        });
-                    }
+                if let Some(active_item) = workspace.active_item(cx)
+                    && let Some(editor) = active_item.act_as::<Editor>(cx)
+                {
+                    editor.update(cx, |editor, cx| {
+                        let text = editor.text(cx);
+                        let insert_text = if text.is_empty() {
+                            sql
+                        } else {
+                            format!("\n\n{sql}")
+                        };
+                        editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+                        editor.insert(&insert_text, window, cx);
+                    });
                 }
             });
         }
@@ -645,15 +646,15 @@ impl ConnectionPanel {
         if let Some(workspace) = self.workspace.upgrade() {
             let sql = sql.to_string();
             workspace.update(cx, |workspace, cx| {
-                if let Some(active_item) = workspace.active_item(cx) {
-                    if let Some(editor) = active_item.act_as::<Editor>(cx) {
-                        editor.update(cx, |editor, cx| {
-                            let text = editor.text(cx);
-                            let prefix = if text.is_empty() { "" } else { "\n\n" };
-                            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
-                            editor.insert(&format!("{prefix}{sql}"), window, cx);
-                        });
-                    }
+                if let Some(active_item) = workspace.active_item(cx)
+                    && let Some(editor) = active_item.act_as::<Editor>(cx)
+                {
+                    editor.update(cx, |editor, cx| {
+                        let text = editor.text(cx);
+                        let prefix = if text.is_empty() { "" } else { "\n\n" };
+                        editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+                        editor.insert(&format!("{prefix}{sql}"), window, cx);
+                    });
                 }
             });
         }
@@ -763,14 +764,18 @@ impl ConnectionPanel {
         self.execute_in_result_panel(&sql, window, cx);
     }
 
-    /// Show the source code of a stored function.
+    /// Show the source code of a stored function as DDL in the result panel.
     fn show_function_source(
         &self,
         func_name: &str,
         schema: &str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let runtime = self.runtime.clone();
         let safe_name = func_name.replace('\'', "''");
         let safe_schema = schema.replace('\'', "''");
         let sql = format!(
@@ -779,7 +784,181 @@ impl ConnectionPanel {
              JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE p.proname = '{safe_name}' AND n.nspname = '{safe_schema}'"
         );
-        self.execute_in_result_panel(&sql, window, cx);
+        let func_display = format!("{schema}.{func_name}");
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { session.execute(&sql).await })
+                .await;
+
+            match result {
+                Ok(Ok(result_set)) => {
+                    let definition = result_set
+                        .rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .map(|cell| cell.display())
+                        .unwrap_or_else(|| {
+                            format!("-- Could not fetch definition for {func_display}")
+                        });
+
+                    let ddl = format!(
+                        "-- Function: {func_display}\n\
+                         -- Edit below and execute with Cmd+Enter to update\n\n\
+                         {definition}"
+                    );
+
+                    this.update(&mut *cx, |panel, cx| {
+                        if let Some(workspace) = panel.workspace.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+                                    result_panel.update(cx, |rpanel, cx| {
+                                        rpanel.show_ddl(ddl, cx);
+                                    });
+                                }
+                            });
+                        }
+                    })
+                    .ok();
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("failed to fetch function source: {e}");
+                }
+                Err(e) => {
+                    tracing::error!("runtime error fetching function source: {e}");
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Show the source code of a trigger as DDL in the result panel.
+    fn show_trigger_source(
+        &self,
+        trigger_name: &str,
+        table_name: &str,
+        schema: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let runtime = self.runtime.clone();
+        let safe_trigger = trigger_name.replace('\'', "''");
+        let safe_table = table_name.replace('\'', "''");
+        let safe_schema = schema.replace('\'', "''");
+        let sql = format!(
+            "SELECT pg_get_triggerdef(t.oid, true) AS definition \
+             FROM pg_trigger t \
+             JOIN pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE t.tgname = '{safe_trigger}' \
+             AND c.relname = '{safe_table}' \
+             AND n.nspname = '{safe_schema}'"
+        );
+        let trigger_display = format!("{schema}.{table_name}.{trigger_name}");
+
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { session.execute(&sql).await })
+                .await;
+
+            match result {
+                Ok(Ok(result_set)) => {
+                    let definition = result_set
+                        .rows
+                        .first()
+                        .and_then(|row| row.first())
+                        .map(|cell| cell.display())
+                        .unwrap_or_else(|| {
+                            format!("-- Could not fetch definition for {trigger_display}")
+                        });
+
+                    let ddl = format!(
+                        "-- Trigger: {trigger_display}\n\
+                         -- Edit below and execute with Cmd+Enter to update\n\n\
+                         {definition}"
+                    );
+
+                    this.update(&mut *cx, |panel, cx| {
+                        if let Some(workspace) = panel.workspace.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+                                    result_panel.update(cx, |rpanel, cx| {
+                                        rpanel.show_ddl(ddl, cx);
+                                    });
+                                }
+                            });
+                        }
+                    })
+                    .ok();
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("failed to fetch trigger source: {e}");
+                }
+                Err(e) => {
+                    tracing::error!("runtime error fetching trigger source: {e}");
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Render a trigger row with a SRC button that fetches the trigger definition.
+    #[allow(clippy::too_many_arguments)]
+    fn render_trigger_row(
+        &self,
+        node_id: &str,
+        label: &str,
+        trigger_name: &str,
+        table_name: &str,
+        schema_name: &str,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let indent = depth as f32 * 12.0;
+
+        let id = SharedString::from(format!("tree-{node_id}"));
+        let src_id = SharedString::from(format!("src-{node_id}"));
+        let trigger_for_src = trigger_name.to_string();
+        let table_for_src = table_name.to_string();
+        let schema_for_src = schema_name.to_string();
+
+        div()
+            .id(id)
+            .h(px(22.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .pl(px(indent + 4.0))
+            .pr_1()
+            .text_xs()
+            .text_color(cx.theme().colors().text)
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
+            .child(div().text_color(cx.theme().colors().text_muted).child("  "))
+            .child(div().flex_1().child(label.to_string()))
+            .child(
+                div()
+                    .id(src_id)
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_disabled)
+                    .hover(|s| s.text_color(cx.theme().colors().text))
+                    .cursor_pointer()
+                    .px_1()
+                    .rounded_sm()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_trigger_source(
+                            &trigger_for_src,
+                            &table_for_src,
+                            &schema_for_src,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child("SRC"),
+            )
+            .into_any_element()
     }
 
     /// Generate CREATE TABLE DDL from introspected schema information.
@@ -993,6 +1172,7 @@ impl ConnectionPanel {
     /// Render a table row that expands on click AND triggers data preview.
     /// Also includes DDL, SQL, INS, and UPD buttons visible on hover.
     /// For views/materialized views, a DEF button is shown to fetch the view definition.
+    #[allow(clippy::too_many_arguments)]
     fn render_table_row(
         &self,
         node_id: &str,
@@ -1344,11 +1524,13 @@ impl ConnectionPanel {
             ));
             if self.is_expanded(&trig_id) {
                 for t in &table.triggers {
-                    rows.push(self.render_tree_row(
+                    rows.push(self.render_trigger_row(
                         &format!("trig:{qualified}.{}", t.name),
                         &format!("{} ({} {})", t.name, t.timing, t.event),
+                        &t.name,
+                        &table.info.name,
+                        schema_name,
                         depth + 2,
-                        false,
                         cx,
                     ));
                 }

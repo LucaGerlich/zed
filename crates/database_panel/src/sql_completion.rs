@@ -113,12 +113,12 @@ impl PickerDelegate for SqlCompletionDelegate {
 
             if let Some(workspace) = self.workspace.upgrade() {
                 workspace.update(cx, |workspace, cx| {
-                    if let Some(active_item) = workspace.active_item(cx) {
-                        if let Some(editor) = active_item.act_as::<Editor>(cx) {
-                            editor.update(cx, |editor, _cx| {
-                                editor.insert(&text, window, _cx);
-                            });
-                        }
+                    if let Some(active_item) = workspace.active_item(cx)
+                        && let Some(editor) = active_item.act_as::<Editor>(cx)
+                    {
+                        editor.update(cx, |editor, _cx| {
+                            editor.insert(&text, window, _cx);
+                        });
                     }
                 });
             }

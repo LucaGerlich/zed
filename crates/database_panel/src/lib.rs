@@ -5,7 +5,6 @@ mod sql_completion;
 use editor::Editor;
 use editor::actions::SelectAll;
 use gpui::{App, AppContext as _, ClipboardItem, Context, Entity, Window, actions};
-use language;
 use picker::Picker;
 use workspace::Workspace;
 
@@ -53,7 +52,9 @@ actions!(
         MissingIndexes,
         ViewPartitions,
         AutovacuumStatus,
-        ViewForeignTables
+        ViewForeignTables,
+        CreateFunction,
+        CreateTrigger
     ]
 );
 
@@ -260,6 +261,16 @@ pub fn init(cx: &mut App) {
                 view_foreign_tables_action(workspace, window, cx);
             });
 
+            // Register the CreateFunction action on the workspace
+            workspace.register_action(|workspace, _: &CreateFunction, window, cx| {
+                create_function_action(workspace, window, cx);
+            });
+
+            // Register the CreateTrigger action on the workspace
+            workspace.register_action(|workspace, _: &CreateTrigger, window, cx| {
+                create_trigger_action(workspace, window, cx);
+            });
+
             if let Some(window) = window {
                 let workspace_weak = cx.weak_entity();
                 let connection = cx.new(|cx| ConnectionPanel::new(workspace_weak, window, cx));
@@ -416,7 +427,6 @@ fn format_sql_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
         indent: sqlformat::Indent::Spaces(4),
         uppercase: true,
         lines_between_queries: 2,
-        ..Default::default()
     };
 
     let formatted = sqlformat::format(&text, &sqlformat::QueryParams::None, options);
@@ -1425,4 +1435,60 @@ fn view_foreign_tables_action(
     ORDER BY foreign_table_schema, foreign_table_name";
 
     execute_system_query(workspace, sql, window, cx);
+}
+
+/// Insert a CREATE FUNCTION template into the active editor.
+fn create_function_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let template = "CREATE OR REPLACE FUNCTION my_function(param1 integer, param2 text)\n\
+        RETURNS void AS $$\n\
+        BEGIN\n\
+            -- Your code here\n\
+            RAISE NOTICE 'Hello from my_function';\n\
+        END;\n\
+        $$ LANGUAGE plpgsql;";
+
+    if let Some(active_item) = workspace.active_item(cx)
+        && let Some(editor) = active_item.act_as::<Editor>(cx)
+    {
+        editor.update(cx, |editor, cx| {
+            let text = editor.text(cx);
+            let prefix = if text.is_empty() { "" } else { "\n\n" };
+            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+            editor.insert(&format!("{prefix}{template}"), window, cx);
+        });
+    }
+}
+
+/// Insert a CREATE TRIGGER template into the active editor.
+fn create_trigger_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let template = "CREATE OR REPLACE FUNCTION my_trigger_function()\n\
+        RETURNS trigger AS $$\n\
+        BEGIN\n\
+            -- Your trigger logic here\n\
+            RETURN NEW;\n\
+        END;\n\
+        $$ LANGUAGE plpgsql;\n\n\
+        CREATE TRIGGER my_trigger\n\
+            BEFORE INSERT OR UPDATE ON my_table\n\
+            FOR EACH ROW\n\
+            EXECUTE FUNCTION my_trigger_function();";
+
+    if let Some(active_item) = workspace.active_item(cx)
+        && let Some(editor) = active_item.act_as::<Editor>(cx)
+    {
+        editor.update(cx, |editor, cx| {
+            let text = editor.text(cx);
+            let prefix = if text.is_empty() { "" } else { "\n\n" };
+            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+            editor.insert(&format!("{prefix}{template}"), window, cx);
+        });
+    }
 }

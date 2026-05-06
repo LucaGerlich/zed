@@ -38,6 +38,8 @@ struct ResultTab {
     state: ResultState,
     sort_column: Option<usize>,
     sort_ascending: bool,
+    /// The source table (schema, table_name) for row editing.
+    source_table: Option<(String, String)>,
     /// The SQL that produced this tab's results (for refresh).
     sql: Option<String>,
     /// The session used to execute the query (for refresh).
@@ -51,6 +53,8 @@ pub struct ResultPanel {
     active: bool,
     tabs: Vec<ResultTab>,
     active_tab: usize,
+    /// Currently selected row index (for inline editing).
+    selected_row: Option<usize>,
 }
 
 impl ResultPanel {
@@ -63,11 +67,13 @@ impl ResultPanel {
                 state: ResultState::Empty,
                 sort_column: None,
                 sort_ascending: true,
+                source_table: None,
                 sql: None,
                 session: None,
                 runtime: None,
             }],
             active_tab: 0,
+            selected_row: None,
         }
     }
 
@@ -79,12 +85,26 @@ impl ResultPanel {
         runtime: Arc<Runtime>,
         cx: &mut Context<Self>,
     ) {
+        self.execute_query_with_source(sql, session, runtime, None, cx);
+    }
+
+    /// Execute a SQL query with an optional source table for inline editing support.
+    pub fn execute_query_with_source(
+        &mut self,
+        sql: String,
+        session: Arc<dyn DatabaseSession>,
+        runtime: Arc<Runtime>,
+        source_table: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         let label: String = sql.chars().take(30).collect();
+        self.selected_row = None;
         self.tabs.push(ResultTab {
             label,
             state: ResultState::Loading,
             sort_column: None,
             sort_ascending: true,
+            source_table,
             sql: Some(sql.clone()),
             session: Some(session.clone()),
             runtime: Some(runtime.clone()),
@@ -134,6 +154,7 @@ impl ResultPanel {
         rows: Vec<Vec<CellValue>>,
         cx: &mut Context<Self>,
     ) {
+        self.selected_row = None;
         self.tabs.push(ResultTab {
             label: "Results".to_string(),
             state: ResultState::Success {
@@ -143,6 +164,7 @@ impl ResultPanel {
             },
             sort_column: None,
             sort_ascending: true,
+            source_table: None,
             sql: None,
             session: None,
             runtime: None,
@@ -153,11 +175,13 @@ impl ResultPanel {
 
     /// Display DDL text in the result panel.
     pub fn show_ddl(&mut self, ddl: String, cx: &mut Context<Self>) {
+        self.selected_row = None;
         self.tabs.push(ResultTab {
             label: "DDL".to_string(),
             state: ResultState::Ddl(ddl),
             sort_column: None,
             sort_ascending: true,
+            source_table: None,
             sql: None,
             session: None,
             runtime: None,
@@ -174,11 +198,13 @@ impl ResultPanel {
         runtime: Arc<Runtime>,
         cx: &mut Context<Self>,
     ) {
+        self.selected_row = None;
         self.tabs.push(ResultTab {
             label: "Explain".to_string(),
             state: ResultState::Loading,
             sort_column: None,
             sort_ascending: true,
+            source_table: None,
             sql: None,
             session: None,
             runtime: None,
@@ -234,6 +260,7 @@ impl ResultPanel {
             return;
         }
         self.tabs.remove(index);
+        self.selected_row = None;
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
@@ -296,16 +323,156 @@ impl ResultPanel {
     /// Clear all result tabs and reset to empty state.
     fn clear_all(&mut self, cx: &mut Context<Self>) {
         self.tabs.clear();
+        self.selected_row = None;
         self.tabs.push(ResultTab {
             label: "Results".to_string(),
             state: ResultState::Empty,
             sort_column: None,
             sort_ascending: true,
+            source_table: None,
             sql: None,
             session: None,
             runtime: None,
         });
         self.active_tab = 0;
+        cx.notify();
+    }
+
+    /// Select a row by index for inline editing.
+    fn select_row(&mut self, row_idx: usize, cx: &mut Context<Self>) {
+        if self.selected_row == Some(row_idx) {
+            self.selected_row = None;
+        } else {
+            self.selected_row = Some(row_idx);
+        }
+        cx.notify();
+    }
+
+    /// Generate an UPDATE statement for the selected row and open it in a new DDL tab.
+    fn edit_selected_row(&mut self, cx: &mut Context<Self>) {
+        let Some(row_idx) = self.selected_row else {
+            return;
+        };
+        let tab = &self.tabs[self.active_tab];
+        let ResultState::Success { columns, rows, .. } = &tab.state else {
+            return;
+        };
+        let sorted = self.sorted_rows(rows);
+        let Some(row) = sorted.get(row_idx) else {
+            return;
+        };
+
+        let table_name = tab
+            .source_table
+            .as_ref()
+            .map(|(s, t)| format!("\"{s}\".\"{t}\""))
+            .unwrap_or_else(|| "your_table".to_string());
+
+        let sets: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let val = Self::cell_to_sql_literal(&row[i]);
+                format!("    \"{}\" = {}", c.name, val)
+            })
+            .collect();
+
+        let where_parts: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match &row[i] {
+                CellValue::Null => format!("\"{}\" IS NULL", c.name),
+                v => format!("\"{}\" = {}", c.name, Self::cell_to_sql_literal(v)),
+            })
+            .collect();
+
+        let sql = format!(
+            "UPDATE {table_name}\nSET\n{}\nWHERE\n    {};",
+            sets.join(",\n"),
+            where_parts.join("\n    AND ")
+        );
+
+        cx.write_to_clipboard(ClipboardItem::new_string(sql.clone()));
+
+        let source_table = tab.source_table.clone();
+        let session = tab.session.clone();
+        let runtime = tab.runtime.clone();
+        self.tabs.push(ResultTab {
+            label: format!("Edit Row {}", row_idx + 1),
+            state: ResultState::Ddl(format!(
+                "-- Edit the values below and execute with Cmd+Enter\n\
+                 -- Original row #{}\n\
+                 -- (Also copied to clipboard)\n\n{}",
+                row_idx + 1,
+                sql
+            )),
+            sort_column: None,
+            sort_ascending: true,
+            source_table,
+            sql: None,
+            session,
+            runtime,
+        });
+        self.active_tab = self.tabs.len() - 1;
+        cx.notify();
+    }
+
+    /// Generate a DELETE statement for the selected row and open it in a new DDL tab.
+    fn delete_selected_row(&mut self, cx: &mut Context<Self>) {
+        let Some(row_idx) = self.selected_row else {
+            return;
+        };
+        let tab = &self.tabs[self.active_tab];
+        let ResultState::Success { columns, rows, .. } = &tab.state else {
+            return;
+        };
+        let sorted = self.sorted_rows(rows);
+        let Some(row) = sorted.get(row_idx) else {
+            return;
+        };
+
+        let table_name = tab
+            .source_table
+            .as_ref()
+            .map(|(s, t)| format!("\"{s}\".\"{t}\""))
+            .unwrap_or_else(|| "your_table".to_string());
+
+        let where_parts: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| match &row[i] {
+                CellValue::Null => format!("\"{}\" IS NULL", c.name),
+                v => format!("\"{}\" = {}", c.name, Self::cell_to_sql_literal(v)),
+            })
+            .collect();
+
+        let sql = format!(
+            "DELETE FROM {table_name}\nWHERE\n    {};",
+            where_parts.join("\n    AND ")
+        );
+
+        cx.write_to_clipboard(ClipboardItem::new_string(sql.clone()));
+
+        let source_table = tab.source_table.clone();
+        let session = tab.session.clone();
+        let runtime = tab.runtime.clone();
+        self.tabs.push(ResultTab {
+            label: format!("Delete Row {}", row_idx + 1),
+            state: ResultState::Ddl(format!(
+                "-- Review the DELETE below and execute with Cmd+Enter\n\
+                 -- Original row #{}\n\
+                 -- (Also copied to clipboard)\n\n{}",
+                row_idx + 1,
+                sql
+            )),
+            sort_column: None,
+            sort_ascending: true,
+            source_table,
+            sql: None,
+            session,
+            runtime,
+        });
+        self.active_tab = self.tabs.len() - 1;
         cx.notify();
     }
 
@@ -574,6 +741,7 @@ impl ResultPanel {
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.active_tab = idx;
+                        this.selected_row = None;
                         cx.notify();
                     }))
                     .child(tab.label.clone())
@@ -779,12 +947,17 @@ impl ResultPanel {
         let columns_clone = columns.to_vec();
         let sorted = self.sorted_rows(rows);
         let row_count = rows.len();
+        let selected_row = self.selected_row;
 
         // Extract theme colors upfront so the closure captures owned Hsla values
         let surface_bg = cx.theme().colors().surface_background;
         let element_active = cx.theme().colors().element_active;
         let text_disabled = cx.theme().colors().text_disabled;
         let text_color = cx.theme().colors().text;
+        let selection_bg = cx.theme().colors().element_selected;
+
+        // Capture a weak entity for click handling inside uniform_list closure
+        let this = cx.entity().downgrade();
 
         div()
             .size_full()
@@ -801,14 +974,18 @@ impl ResultPanel {
                         .enumerate()
                         .map(|(local_idx, row)| {
                             let idx = range.start + local_idx;
+                            let this = this.clone();
                             Self::render_data_row_static(
                                 idx,
                                 row,
                                 &columns_clone,
+                                selected_row,
                                 surface_bg,
                                 element_active,
+                                selection_bg,
                                 text_disabled,
                                 text_color,
+                                Some(this),
                             )
                         })
                         .collect()
@@ -899,16 +1076,28 @@ impl ResultPanel {
         header
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_data_row_static(
         idx: usize,
         row: &[CellValue],
         _columns: &[ColumnMeta],
+        selected_row: Option<usize>,
         surface_bg: Hsla,
         element_active: Hsla,
+        selection_bg: Hsla,
         text_disabled: Hsla,
         text_color: Hsla,
+        weak_entity: Option<WeakEntity<ResultPanel>>,
     ) -> Stateful<Div> {
-        let is_even = idx.is_multiple_of(2);
+        let is_selected = selected_row == Some(idx);
+        let bg = if is_selected {
+            selection_bg
+        } else if idx.is_multiple_of(2) {
+            surface_bg
+        } else {
+            // Odd rows get no explicit bg (transparent)
+            Hsla::default()
+        };
 
         let mut row_div = div()
             .id(ElementId::Name(SharedString::from(format!("row-{idx}"))))
@@ -916,8 +1105,20 @@ impl ResultPanel {
             .flex_row()
             .h(px(22.))
             .px_1()
-            .when(is_even, |s| s.bg(surface_bg))
+            .cursor_pointer()
+            .when(is_selected, |s| s.bg(bg))
+            .when(!is_selected && idx.is_multiple_of(2), |s| s.bg(surface_bg))
             .hover(|s| s.bg(element_active));
+
+        // Add click handler if we have a weak entity reference
+        if let Some(this) = weak_entity {
+            row_div = row_div.on_click(move |_event, _window, cx| {
+                this.update(cx, |panel, cx| {
+                    panel.select_row(idx, cx);
+                })
+                .ok();
+            });
+        }
 
         // Row number
         row_div = row_div.child(
@@ -966,12 +1167,19 @@ impl ResultPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let row_word = if row_count == 1 { "row" } else { "rows" };
+        let selected_info = self
+            .selected_row
+            .map(|r| format!(" | Row {} selected", r + 1))
+            .unwrap_or_default();
         let tab_info = format!(
-            "Fetched {row_count} {row_word} in {duration_ms}ms | Tab {} of {}",
+            "Fetched {row_count} {row_word} in {duration_ms}ms | Tab {} of {}{}",
             self.active_tab + 1,
-            self.tabs.len()
+            self.tabs.len(),
+            selected_info
         );
-        div()
+        let has_selected = self.selected_row.is_some();
+
+        let mut footer = div()
             .flex()
             .flex_row()
             .items_center()
@@ -986,57 +1194,73 @@ impl ResultPanel {
                     .text_xs()
                     .text_color(cx.theme().colors().text_muted)
                     .child(tab_info),
+            );
+
+        let mut buttons = div().flex().flex_row().gap_1();
+
+        // Show Edit Row and Delete Row buttons when a row is selected
+        if has_selected {
+            buttons = buttons
+                .child(
+                    Button::new("edit-row-btn", "Edit Row")
+                        .style(ButtonStyle::Subtle)
+                        .label_size(LabelSize::XSmall)
+                        .on_click(cx.listener(|this, _, _window, cx| this.edit_selected_row(cx))),
+                )
+                .child(
+                    Button::new("delete-row-btn", "Delete Row")
+                        .style(ButtonStyle::Subtle)
+                        .label_size(LabelSize::XSmall)
+                        .on_click(cx.listener(|this, _, _window, cx| this.delete_selected_row(cx))),
+                );
+        }
+
+        buttons = buttons
+            .child(
+                Button::new("refresh-btn", "Refresh")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(|this, _, _window, cx| this.refresh_current_tab(cx))),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .child(
-                        Button::new("refresh-btn", "Refresh")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .on_click(
-                                cx.listener(|this, _, _window, cx| this.refresh_current_tab(cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("clear-btn", "Clear")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .on_click(cx.listener(|this, _, _window, cx| this.clear_all(cx))),
-                    )
-                    .child(
-                        Button::new("export-csv", "CSV")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .on_click(cx.listener(|this, _, _window, cx| this.export_csv(cx))),
-                    )
-                    .child(
-                        Button::new("export-json", "JSON")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .on_click(cx.listener(|this, _, _window, cx| this.export_json(cx))),
-                    )
-                    .child(
-                        Button::new("export-insert", "INSERT")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .on_click(cx.listener(|this, _, _window, cx| this.export_insert(cx))),
-                    )
-                    .child(
-                        Button::new("export-update", "UPDATE")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .on_click(cx.listener(|this, _, _window, cx| this.export_update(cx))),
-                    )
-                    .child(
-                        Button::new("export-delete", "DELETE")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::XSmall)
-                            .on_click(cx.listener(|this, _, _window, cx| this.export_delete(cx))),
-                    ),
+                Button::new("clear-btn", "Clear")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(|this, _, _window, cx| this.clear_all(cx))),
             )
+            .child(
+                Button::new("export-csv", "CSV")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(|this, _, _window, cx| this.export_csv(cx))),
+            )
+            .child(
+                Button::new("export-json", "JSON")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(|this, _, _window, cx| this.export_json(cx))),
+            )
+            .child(
+                Button::new("export-insert", "INSERT")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(|this, _, _window, cx| this.export_insert(cx))),
+            )
+            .child(
+                Button::new("export-update", "UPDATE")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(|this, _, _window, cx| this.export_update(cx))),
+            )
+            .child(
+                Button::new("export-delete", "DELETE")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .on_click(cx.listener(|this, _, _window, cx| this.export_delete(cx))),
+            );
+
+        footer = footer.child(buttons);
+        footer
     }
 }
 
