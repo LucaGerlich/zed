@@ -3,6 +3,38 @@ use uuid::Uuid;
 
 use crate::error::ConnectionError;
 
+/// SSH authentication method for tunnel connections.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SshAuth {
+    /// Use the system SSH agent (ssh-agent).
+    #[default]
+    Agent,
+    /// Use a private key file at the given path.
+    KeyFile { path: String },
+}
+
+/// Configuration for an SSH tunnel used to reach the database host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshConfig {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth: SshAuth,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: String::new(),
+            port: 22,
+            username: String::new(),
+            auth: SshAuth::default(),
+        }
+    }
+}
+
 /// Opaque identifier for a saved connection profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub Uuid);
@@ -74,6 +106,9 @@ pub struct ConnectionProfile {
     pub ssl_mode: SslMode,
     /// Whether this profile defaults to read-only mode when connected.
     pub read_only_default: bool,
+    /// SSH tunnel configuration for reaching remote databases.
+    #[serde(default)]
+    pub ssh: SshConfig,
 }
 
 impl ConnectionProfile {

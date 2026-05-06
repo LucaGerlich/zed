@@ -9,10 +9,11 @@ use ui::{Button, ButtonStyle, IconName};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use pgblade_core::connection::{ConnectionProfile, Environment};
+use pgblade_core::connection::{ConnectionProfile, Environment, SshAuth, SshConfig};
 use pgblade_core::driver::{DatabaseDriver, DatabaseSession};
 use pgblade_core::schema::{SchemaTree, TableEntry, TableKind};
 use pgblade_core::security::CredentialStore;
+use pgblade_core::ssh::SshTunnel;
 use pgblade_core::storage::StorageManager;
 use pgblade_postgres::PostgresDriver;
 use pgblade_security::KeychainStore;
@@ -39,6 +40,13 @@ pub struct ConnectionPanel {
     username_editor: Entity<Editor>,
     password_editor: Entity<Editor>,
     form_environment: Environment,
+    // SSH tunnel form fields
+    ssh_enabled: bool,
+    ssh_host_editor: Entity<Editor>,
+    ssh_port_editor: Entity<Editor>,
+    ssh_username_editor: Entity<Editor>,
+    ssh_key_editor: Entity<Editor>,
+    ssh_auth: SshAuth,
     // Storage
     storage: StorageManager,
     credential_store: KeychainStore,
@@ -47,6 +55,8 @@ pub struct ConnectionPanel {
     driver: PostgresDriver,
     session: Option<Arc<dyn DatabaseSession>>,
     connected_profile: Option<ConnectionProfile>,
+    // Active SSH tunnel (kept alive while connected)
+    ssh_tunnel: Option<SshTunnel>,
     // Schema tree state
     schema_tree: Option<SchemaTree>,
     expanded_nodes: HashSet<String>,
@@ -101,6 +111,31 @@ impl ConnectionPanel {
             editor
         });
 
+        let ssh_host_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("ssh.example.com", window, cx);
+            editor
+        });
+
+        let ssh_port_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("22", window, cx);
+            editor.set_text("22", window, cx);
+            editor
+        });
+
+        let ssh_username_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("username", window, cx);
+            editor
+        });
+
+        let ssh_key_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("~/.ssh/id_rsa", window, cx);
+            editor
+        });
+
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -120,12 +155,19 @@ impl ConnectionPanel {
             username_editor,
             password_editor,
             form_environment: Environment::Local,
+            ssh_enabled: false,
+            ssh_host_editor,
+            ssh_port_editor,
+            ssh_username_editor,
+            ssh_key_editor,
+            ssh_auth: SshAuth::Agent,
             storage,
             credential_store: KeychainStore::new(),
             runtime,
             driver,
             session: None,
             connected_profile: None,
+            ssh_tunnel: None,
             schema_tree: None,
             expanded_nodes: HashSet::new(),
             workspace,
@@ -152,6 +194,22 @@ impl ConnectionPanel {
                 editor.set_text("", window, cx);
             });
             self.form_environment = Environment::Local;
+
+            // Reset SSH fields
+            self.ssh_enabled = false;
+            self.ssh_host_editor.update(cx, |editor, cx| {
+                editor.set_text("", window, cx);
+            });
+            self.ssh_port_editor.update(cx, |editor, cx| {
+                editor.set_text("22", window, cx);
+            });
+            self.ssh_username_editor.update(cx, |editor, cx| {
+                editor.set_text("", window, cx);
+            });
+            self.ssh_key_editor.update(cx, |editor, cx| {
+                editor.set_text("", window, cx);
+            });
+            self.ssh_auth = SshAuth::Agent;
         }
         cx.notify();
     }
@@ -163,6 +221,25 @@ impl ConnectionPanel {
         let username = self.username_editor.read(cx).text(cx);
         let password = self.password_editor.read(cx).text(cx);
 
+        let ssh = if self.ssh_enabled {
+            let key_path = self.ssh_key_editor.read(cx).text(cx);
+            let auth = match &self.ssh_auth {
+                SshAuth::KeyFile { .. } if !key_path.trim().is_empty() => SshAuth::KeyFile {
+                    path: key_path.trim().to_string(),
+                },
+                _ => SshAuth::Agent,
+            };
+            SshConfig {
+                enabled: true,
+                host: self.ssh_host_editor.read(cx).text(cx),
+                port: self.ssh_port_editor.read(cx).text(cx).parse().unwrap_or(22),
+                username: self.ssh_username_editor.read(cx).text(cx),
+                auth,
+            }
+        } else {
+            SshConfig::default()
+        };
+
         let profile = ConnectionProfile {
             id: pgblade_core::connection::ConnectionId::new(),
             name: format!("{}@{}", database, host),
@@ -173,6 +250,7 @@ impl ConnectionPanel {
             environment: self.form_environment,
             ssl_mode: pgblade_core::connection::SslMode::Disable,
             read_only_default: self.form_environment.is_production(),
+            ssh,
         };
 
         // Check for duplicates
@@ -211,7 +289,36 @@ impl ConnectionPanel {
         self.connect(profile, password, cx);
     }
 
-    fn connect(&mut self, profile: ConnectionProfile, password: String, cx: &mut Context<Self>) {
+    fn connect(
+        &mut self,
+        mut profile: ConnectionProfile,
+        password: String,
+        cx: &mut Context<Self>,
+    ) {
+        // Establish SSH tunnel if configured
+        if profile.ssh.enabled {
+            let original_host = profile.host.clone();
+            let original_port = profile.port;
+
+            match SshTunnel::start(&profile.ssh, &original_host, original_port) {
+                Ok(tunnel) => {
+                    tracing::info!(
+                        "SSH tunnel established: localhost:{} -> {}:{}",
+                        tunnel.local_port(),
+                        original_host,
+                        original_port
+                    );
+                    profile.host = "127.0.0.1".to_string();
+                    profile.port = tunnel.local_port();
+                    self.ssh_tunnel = Some(tunnel);
+                }
+                Err(e) => {
+                    tracing::error!("SSH tunnel failed: {e}");
+                    return;
+                }
+            }
+        }
+
         let driver = self.driver.clone();
         let runtime = self.runtime.clone();
         let connect_profile = profile.clone();
@@ -236,9 +343,18 @@ impl ConnectionPanel {
                 }
                 Ok(Err(e)) => {
                     tracing::error!("connection failed: {e}");
+                    // Clean up tunnel on connection failure
+                    this.update(cx, |panel, _cx| {
+                        panel.ssh_tunnel = None;
+                    })
+                    .ok();
                 }
                 Err(e) => {
                     tracing::error!("runtime error: {e}");
+                    this.update(cx, |panel, _cx| {
+                        panel.ssh_tunnel = None;
+                    })
+                    .ok();
                 }
             }
         })
@@ -382,6 +498,7 @@ impl ConnectionPanel {
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.session = None;
         self.connected_profile = None;
+        self.ssh_tunnel = None; // Kills the SSH process via Drop
         self.schema_tree = None;
         self.expanded_nodes.clear();
         cx.notify();
@@ -1232,6 +1349,121 @@ impl ConnectionPanel {
             .child(row)
     }
 
+    fn render_ssh_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ssh_enabled = self.ssh_enabled;
+        let ssh_auth = self.ssh_auth.clone();
+
+        let mut section = div().flex().flex_col().gap_2().child(
+            div()
+                .id("ssh-toggle")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _window, cx| {
+                    this.ssh_enabled = !this.ssh_enabled;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(12.))
+                        .h(px(12.))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().colors().border)
+                        .when(ssh_enabled, |s| s.bg(cx.theme().colors().element_active)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().colors().text)
+                        .child("SSH Tunnel"),
+                ),
+        );
+
+        if self.ssh_enabled {
+            section = section
+                .child(self.render_editor_field("SSH Host", &self.ssh_host_editor, cx))
+                .child(self.render_editor_field("SSH Port", &self.ssh_port_editor, cx))
+                .child(self.render_editor_field("SSH Username", &self.ssh_username_editor, cx))
+                .child(self.render_ssh_auth_selector(cx))
+                .when(matches!(ssh_auth, SshAuth::KeyFile { .. }), |s| {
+                    s.child(self.render_editor_field("Key File Path", &self.ssh_key_editor, cx))
+                });
+        }
+
+        section
+    }
+
+    fn render_ssh_auth_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_agent = matches!(self.ssh_auth, SshAuth::Agent);
+        let is_keyfile = matches!(self.ssh_auth, SshAuth::KeyFile { .. });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child("Auth Method"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id("ssh-auth-agent")
+                            .px_2()
+                            .py(px(2.))
+                            .text_xs()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .when(is_agent, |s| {
+                                s.bg(cx.theme().colors().element_active)
+                                    .text_color(cx.theme().colors().text)
+                            })
+                            .when(!is_agent, |s| {
+                                s.text_color(cx.theme().colors().text_muted)
+                                    .hover(|s| s.bg(cx.theme().colors().element_active))
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.ssh_auth = SshAuth::Agent;
+                                cx.notify();
+                            }))
+                            .child("Agent"),
+                    )
+                    .child(
+                        div()
+                            .id("ssh-auth-keyfile")
+                            .px_2()
+                            .py(px(2.))
+                            .text_xs()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .when(is_keyfile, |s| {
+                                s.bg(cx.theme().colors().element_active)
+                                    .text_color(cx.theme().colors().text)
+                            })
+                            .when(!is_keyfile, |s| {
+                                s.text_color(cx.theme().colors().text_muted)
+                                    .hover(|s| s.bg(cx.theme().colors().element_active))
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.ssh_auth = SshAuth::KeyFile {
+                                    path: String::new(),
+                                };
+                                cx.notify();
+                            }))
+                            .child("Key File"),
+                    ),
+            )
+    }
+
     fn render_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -1254,6 +1486,7 @@ impl ConnectionPanel {
             .child(self.render_editor_field("Username", &self.username_editor, cx))
             .child(self.render_editor_field("Password", &self.password_editor, cx))
             .child(self.render_environment_selector(cx))
+            .child(self.render_ssh_section(cx))
             .child(
                 div()
                     .flex()

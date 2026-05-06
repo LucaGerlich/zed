@@ -9,4 +9,5 @@ pub mod result;
 pub mod safety;
 pub mod schema;
 pub mod security;
+pub mod ssh;
 pub mod storage;

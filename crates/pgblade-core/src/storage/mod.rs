@@ -95,6 +95,13 @@ impl StorageManager {
             );
             ",
         )?;
+
+        // Migration: add ssh_config column (idempotent — silently ignored if exists)
+        let _ = self.conn.execute(
+            "ALTER TABLE connections ADD COLUMN ssh_config TEXT DEFAULT '{}'",
+            [],
+        );
+
         Ok(())
     }
 }

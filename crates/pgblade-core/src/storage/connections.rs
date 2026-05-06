@@ -1,6 +1,6 @@
 use rusqlite::params;
 
-use crate::connection::{ConnectionId, ConnectionProfile, Environment, SslMode};
+use crate::connection::{ConnectionId, ConnectionProfile, Environment, SshConfig, SslMode};
 
 use super::{StorageError, StorageManager};
 
@@ -39,10 +39,11 @@ impl StorageManager {
     /// Persists a connection profile, replacing any existing entry with the same ID.
     pub fn save_connection(&self, profile: &ConnectionProfile) -> Result<(), StorageError> {
         let now = chrono::Utc::now().to_rfc3339();
+        let ssh_json = serde_json::to_string(&profile.ssh).unwrap_or_else(|_| "{}".to_string());
         self.conn.execute(
             "INSERT OR REPLACE INTO connections
-                (id, name, host, port, database_name, username, environment, ssl_mode, read_only_default, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                (id, name, host, port, database_name, username, environment, ssl_mode, read_only_default, ssh_config, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 profile.id.0.to_string(),
                 profile.name,
@@ -53,6 +54,7 @@ impl StorageManager {
                 format!("{:?}", profile.environment),
                 format!("{:?}", profile.ssl_mode),
                 profile.read_only_default as i64,
+                ssh_json,
                 now,
                 now,
             ],
@@ -63,7 +65,7 @@ impl StorageManager {
     /// Loads all saved connection profiles ordered by name.
     pub fn load_connections(&self) -> Result<Vec<ConnectionProfile>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, host, port, database_name, username, environment, ssl_mode, read_only_default
+            "SELECT id, name, host, port, database_name, username, environment, ssl_mode, read_only_default, ssh_config
              FROM connections
              ORDER BY name",
         )?;
@@ -79,6 +81,9 @@ impl StorageManager {
                 let env_str: String = row.get(6)?;
                 let ssl_str: String = row.get(7)?;
                 let read_only: i64 = row.get(8)?;
+                let ssh_json: String = row.get::<_, String>(9).unwrap_or_else(|_| "{}".to_string());
+
+                let ssh: SshConfig = serde_json::from_str(&ssh_json).unwrap_or_default();
 
                 Ok(ConnectionProfile {
                     id: ConnectionId(
@@ -92,6 +97,7 @@ impl StorageManager {
                     environment: parse_environment(&env_str),
                     ssl_mode: parse_ssl_mode(&ssl_str),
                     read_only_default: read_only != 0,
+                    ssh,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -150,6 +156,7 @@ mod tests {
             environment: Environment::Development,
             ssl_mode: SslMode::Prefer,
             read_only_default: false,
+            ssh: SshConfig::default(),
         }
     }
 

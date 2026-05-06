@@ -13001,6 +13001,7 @@ dependencies = [
  "dirs",
  "rusqlite",
  "serde",
+ "serde_json",
  "sqlparser",
  "thiserror 2.0.17",
  "uuid",
