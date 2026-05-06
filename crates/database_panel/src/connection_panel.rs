@@ -1250,7 +1250,12 @@ impl ConnectionPanel {
         let id = SharedString::from(format!("tree-{node_id}"));
         let node_id_owned = node_id.to_string();
         let schema_owned = schema_name.to_string();
-        let table_owned = table_name.to_string();
+        // Extract the raw table name (strip row estimate suffix like " (~1.2K)")
+        let table_owned = table_name
+            .find(" (~")
+            .map(|i| &table_name[..i])
+            .unwrap_or(table_name)
+            .to_string();
 
         // Build hover action buttons
         let schema_for_sql = schema_name.to_string();
