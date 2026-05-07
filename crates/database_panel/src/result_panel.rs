@@ -15,6 +15,14 @@ use pgblade_core::result::{CellValue, ColumnMeta};
 
 actions!(database_result_panel, [ToggleFocus]);
 
+/// Events emitted by the ResultPanel for cross-panel communication.
+#[derive(Debug, Clone)]
+pub enum ResultPanelEvent {
+    /// A DDL query (CREATE, ALTER, DROP, TRUNCATE) completed successfully,
+    /// so the schema tree should be refreshed.
+    SchemaChanged,
+}
+
 pub fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
         workspace.toggle_panel_focus::<ResultPanel>(window, cx);
@@ -156,6 +164,18 @@ impl ResultPanel {
                             };
                             tab.has_more = has_more;
                             tab.row_limit = row_limit;
+
+                            // Detect DDL queries and notify for schema refresh
+                            if let Some(sql) = &tab.sql {
+                                let upper = sql.trim().to_uppercase();
+                                if upper.starts_with("CREATE")
+                                    || upper.starts_with("ALTER")
+                                    || upper.starts_with("DROP")
+                                    || upper.starts_with("TRUNCATE")
+                                {
+                                    cx.emit(ResultPanelEvent::SchemaChanged);
+                                }
+                            }
                         }
                         Ok(Err(e)) => {
                             tab.state = ResultState::Error(e.to_string());
@@ -1737,6 +1757,7 @@ impl Focusable for ResultPanel {
 }
 
 impl EventEmitter<PanelEvent> for ResultPanel {}
+impl EventEmitter<ResultPanelEvent> for ResultPanel {}
 
 impl Render for ResultPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

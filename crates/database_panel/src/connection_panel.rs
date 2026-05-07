@@ -453,7 +453,7 @@ impl ConnectionPanel {
         }
     }
 
-    fn connect(
+    pub fn connect(
         &mut self,
         mut profile: ConnectionProfile,
         password: String,
@@ -511,6 +511,7 @@ impl ConnectionPanel {
                         cx.emit(PanelEvent::Activate);
                         cx.notify();
                         panel.fetch_schema(cx);
+                        panel.start_health_check(cx);
                     })
                     .ok();
                 }
@@ -537,7 +538,7 @@ impl ConnectionPanel {
         .detach();
     }
 
-    fn fetch_schema(&mut self, cx: &mut Context<Self>) {
+    pub fn fetch_schema(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
         };
@@ -631,6 +632,56 @@ impl ConnectionPanel {
                 }
                 Err(e) => {
                     tracing::error!("runtime error during schema fetch: {e}");
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Start a background health check that pings the database every 30 seconds.
+    /// If the connection is lost, the panel resets to disconnected state.
+    fn start_health_check(&mut self, cx: &mut Context<Self>) {
+        let runtime = self.runtime.clone();
+
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(30))
+                    .await;
+
+                // Get the current session from the panel each iteration
+                let session = this
+                    .update(cx, |panel, _cx| panel.session.clone())
+                    .ok()
+                    .flatten();
+
+                let Some(session) = session else {
+                    // Panel was disconnected or dropped, stop health checking
+                    break;
+                };
+
+                let rt = runtime.clone();
+                let result = rt
+                    .spawn(async move { session.execute("SELECT 1").await })
+                    .await;
+
+                match result {
+                    Ok(Ok(_)) => {
+                        // Connection is healthy
+                    }
+                    _ => {
+                        // Connection dropped
+                        tracing::warn!("health check failed, marking connection as lost");
+                        this.update(cx, |panel, cx| {
+                            panel.error_message = Some(
+                                "Connection lost. Click a saved connection to reconnect."
+                                    .to_string(),
+                            );
+                            panel.disconnect(cx);
+                        })
+                        .ok();
+                        break;
+                    }
                 }
             }
         })

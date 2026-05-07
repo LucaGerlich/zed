@@ -12,6 +12,9 @@ use gpui::{App, AppContext as _, ClipboardItem, Context, Entity, Window, actions
 use picker::Picker;
 use workspace::Workspace;
 
+use pgblade_core::connection::{ConnectionId, ConnectionProfile, Environment, SshConfig, SslMode};
+use result_panel::ResultPanelEvent;
+
 pub use connection_panel::ConnectionPanel;
 pub use database_status::DatabaseStatusItem;
 pub use result_panel::ResultPanel;
@@ -85,7 +88,10 @@ actions!(
         HealthCheck,
         CopyQualifiedName,
         GenerateGrant,
-        AdminCommands
+        AdminCommands,
+        DetectEnvDatabase,
+        SetTimeout,
+        RefreshSchema
     ]
 );
 
@@ -439,6 +445,25 @@ pub fn init(cx: &mut App) {
                 admin_commands_action(workspace, window, cx);
             });
 
+            // Register the DetectEnvDatabase action on the workspace
+            workspace.register_action(|workspace, _: &DetectEnvDatabase, window, cx| {
+                detect_env_database_action(workspace, window, cx);
+            });
+
+            // Register the SetTimeout action on the workspace
+            workspace.register_action(|workspace, _: &SetTimeout, window, cx| {
+                set_timeout_action(workspace, window, cx);
+            });
+
+            // Register the RefreshSchema action on the workspace
+            workspace.register_action(|workspace, _: &RefreshSchema, _window, cx| {
+                if let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) {
+                    conn_panel.update(cx, |panel, cx| {
+                        panel.fetch_schema(cx);
+                    });
+                }
+            });
+
             if let Some(window) = window {
                 let workspace_weak = cx.weak_entity();
                 let provider_clone = provider_for_workspace.clone();
@@ -447,6 +472,22 @@ pub fn init(cx: &mut App) {
                 workspace.add_panel(connection.clone(), window, cx);
 
                 let results = cx.new(ResultPanel::new);
+
+                // Subscribe to ResultPanel events for schema change detection (Feature 4)
+                cx.subscribe(
+                    &results,
+                    |workspace: &mut Workspace, _panel, event: &ResultPanelEvent, cx| match event {
+                        ResultPanelEvent::SchemaChanged => {
+                            if let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) {
+                                conn_panel.update(cx, |panel, cx| {
+                                    panel.fetch_schema(cx);
+                                });
+                            }
+                        }
+                    },
+                )
+                .detach();
+
                 workspace.add_panel(results, window, cx);
 
                 // Auto-open the connection panel if there are saved connections
@@ -2440,4 +2481,213 @@ fn admin_commands_action(
         -- Reset statistics\n\
         SELECT pg_stat_reset();";
     insert_into_editor(workspace, sql, window, cx);
+}
+
+// ---------------------------------------------------------------------------
+// Feature 1: .env File Integration
+// ---------------------------------------------------------------------------
+
+struct ParsedDatabaseUrl {
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    password: String,
+    sslmode: bool,
+}
+
+/// Parse a postgres:// or postgresql:// connection URL into its components.
+fn parse_database_url(url: &str) -> Option<ParsedDatabaseUrl> {
+    let url = url
+        .strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))?;
+
+    let (auth, rest) = url.split_once('@')?;
+    let (username, password) = auth.split_once(':').unwrap_or((auth, ""));
+
+    let (host_port, db_params) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port_str) = host_port.split_once(':').unwrap_or((host_port, "5432"));
+    let port: u16 = port_str.parse().unwrap_or(5432);
+
+    let (database, params) = db_params.split_once('?').unwrap_or((db_params, ""));
+    let sslmode = params.contains("sslmode=require");
+
+    Some(ParsedDatabaseUrl {
+        host: host.to_string(),
+        port,
+        database: database.to_string(),
+        username: username.to_string(),
+        password: password.to_string(),
+        sslmode,
+    })
+}
+
+/// Detect DATABASE_URL from .env files in the current working directory and auto-connect.
+fn detect_env_database_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let cwd = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+                workspace.open_panel::<ResultPanel>(window, cx);
+                result_panel.update(cx, |panel, cx| {
+                    panel.show_ddl(
+                        "Could not determine current working directory.".to_string(),
+                        cx,
+                    );
+                });
+            }
+            return;
+        }
+    };
+
+    let env_files = [".env", ".env.local", ".env.development", ".env.production"];
+    let db_keys = [
+        "DATABASE_URL",
+        "DB_URL",
+        "POSTGRES_URL",
+        "PG_URL",
+        "POSTGRESQL_URL",
+    ];
+
+    let mut database_urls: Vec<(String, String, String)> = Vec::new();
+
+    for env_file in &env_files {
+        let env_path = cwd.join(env_file);
+        if let Ok(content) = std::fs::read_to_string(&env_path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with('#') || line.is_empty() {
+                    continue;
+                }
+
+                for key in &db_keys {
+                    if let Some(value) = line.strip_prefix(&format!("{key}=")) {
+                        let url = value.trim().trim_matches('"').trim_matches('\'');
+                        if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+                            database_urls.push((
+                                env_file.to_string(),
+                                key.to_string(),
+                                url.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if database_urls.is_empty() {
+        if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+            workspace.open_panel::<ResultPanel>(window, cx);
+            result_panel.update(cx, |panel, cx| {
+                panel.show_ddl(
+                    "No DATABASE_URL found in .env files.\n\n\
+                     Checked: .env, .env.local, .env.development, .env.production\n\
+                     Looked for: DATABASE_URL, DB_URL, POSTGRES_URL, PG_URL, POSTGRESQL_URL"
+                        .to_string(),
+                    cx,
+                );
+            });
+        }
+        return;
+    }
+
+    let (file, key, url) = &database_urls[0];
+
+    if let Some(parsed) = parse_database_url(url) {
+        let info = format!(
+            "Found {} database URL(s) in project:\n\n{}\n\n\
+             Parsed from {} in {}:\n  Host: {}\n  Port: {}\n  Database: {}\n  Username: {}",
+            database_urls.len(),
+            database_urls
+                .iter()
+                .map(|(f, k, _)| format!("  {f}: {k}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            key,
+            file,
+            parsed.host,
+            parsed.port,
+            parsed.database,
+            parsed.username
+        );
+
+        // Auto-connect via the ConnectionPanel
+        if let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) {
+            let profile = ConnectionProfile {
+                id: ConnectionId::new(),
+                name: format!("{}@{} (from .env)", parsed.database, parsed.host),
+                host: parsed.host.clone(),
+                port: parsed.port,
+                database: parsed.database.clone(),
+                username: parsed.username.clone(),
+                environment: if file.contains("production") {
+                    Environment::Production
+                } else {
+                    Environment::Development
+                },
+                ssl_mode: if parsed.sslmode {
+                    SslMode::Require
+                } else {
+                    SslMode::Disable
+                },
+                read_only_default: file.contains("production"),
+                ssh: SshConfig::default(),
+            };
+
+            conn_panel.update(cx, |panel, cx| {
+                panel.connect(profile, parsed.password.clone(), cx);
+            });
+        }
+
+        // Show info in result panel
+        if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+            workspace.open_panel::<ResultPanel>(window, cx);
+            result_panel.update(cx, |panel, cx| {
+                panel.show_ddl(info, cx);
+            });
+        }
+    } else if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        workspace.open_panel::<ResultPanel>(window, cx);
+        result_panel.update(cx, |panel, cx| {
+            panel.show_ddl(
+                format!("Found {key} in {file} but could not parse the URL."),
+                cx,
+            );
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 3: Query Timeout Configuration
+// ---------------------------------------------------------------------------
+
+/// Set statement_timeout for the current session. Reads timeout value from
+/// the active editor selection (in seconds or PostgreSQL interval notation).
+fn set_timeout_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        // Default to 30 seconds if nothing is selected
+        let sql = "SET statement_timeout = '30s'";
+        execute_system_query(workspace, sql, window, cx);
+        return;
+    };
+    let timeout = selected.trim();
+
+    let sql = if timeout.parse::<u32>().is_ok() {
+        format!("SET statement_timeout = '{}s'", timeout)
+    } else {
+        format!("SET statement_timeout = '{}'", timeout)
+    };
+
+    execute_system_query(workspace, &sql, window, cx);
 }
