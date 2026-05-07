@@ -118,7 +118,16 @@ actions!(
         TableMaintenance,
         ConnectionAge,
         CheckpointStats,
-        IoStats
+        IoStats,
+        ViewHbaRules,
+        ConfigFiles,
+        GenerateIndexPatterns,
+        GenerateCrud,
+        ViewEventTriggers,
+        ViewPublications,
+        ViewSubscriptions,
+        GenerateConnectionStrings,
+        PartitionTemplate
     ]
 );
 
@@ -593,6 +602,42 @@ pub fn init(cx: &mut App) {
 
             workspace.register_action(|workspace, _: &IoStats, window, cx| {
                 io_stats_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ViewHbaRules, window, cx| {
+                view_hba_rules_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ConfigFiles, window, cx| {
+                config_files_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &GenerateIndexPatterns, window, cx| {
+                generate_index_patterns_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &GenerateCrud, window, cx| {
+                generate_crud_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ViewEventTriggers, window, cx| {
+                view_event_triggers_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ViewPublications, window, cx| {
+                view_publications_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ViewSubscriptions, window, cx| {
+                view_subscriptions_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &GenerateConnectionStrings, window, cx| {
+                generate_connection_strings_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &PartitionTemplate, window, cx| {
+                partition_template_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -4034,4 +4079,344 @@ fn io_stats_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     ORDER BY heap_blks_read DESC \
     LIMIT 20";
     execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show pg_hba.conf authentication rules.
+fn view_hba_rules_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        line_number, \
+        type, \
+        database, \
+        user_name, \
+        address, \
+        netmask, \
+        auth_method, \
+        options, \
+        error \
+    FROM pg_hba_file_rules \
+    ORDER BY line_number";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show configuration file locations.
+fn config_files_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT name, setting AS value \
+    FROM pg_settings \
+    WHERE name IN ('config_file', 'hba_file', 'ident_file', 'data_directory', \
+        'log_directory', 'archive_command', 'ssl_cert_file', 'ssl_key_file') \
+    ORDER BY name";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Generate common index patterns for a table name selected in the editor.
+fn generate_index_patterns_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table = selected.trim();
+    let table_short = table.split('.').last().unwrap_or(table).trim_matches('"');
+
+    let sql = format!(
+        "-- Index patterns for {table}\n\n\
+         -- B-tree index (default, good for equality and range queries)\n\
+         CREATE INDEX idx_{table_short}_column ON {table} (column_name);\n\n\
+         -- Composite index (for multi-column WHERE clauses)\n\
+         CREATE INDEX idx_{table_short}_multi ON {table} (col1, col2);\n\n\
+         -- Partial index (only index rows matching a condition)\n\
+         CREATE INDEX idx_{table_short}_active ON {table} (column_name) WHERE active = true;\n\n\
+         -- Unique index\n\
+         CREATE UNIQUE INDEX idx_{table_short}_unique ON {table} (column_name);\n\n\
+         -- GIN index (for JSONB, arrays, full-text search)\n\
+         CREATE INDEX idx_{table_short}_gin ON {table} USING gin (jsonb_column);\n\n\
+         -- GiST index (for geometric, range, full-text)\n\
+         CREATE INDEX idx_{table_short}_gist ON {table} USING gist (tsv_column);\n\n\
+         -- BRIN index (for naturally ordered data like timestamps)\n\
+         CREATE INDEX idx_{table_short}_brin ON {table} USING brin (created_at);\n\n\
+         -- Expression index\n\
+         CREATE INDEX idx_{table_short}_lower ON {table} (LOWER(email));\n\n\
+         -- Covering index (INCLUDE for index-only scans)\n\
+         CREATE INDEX idx_{table_short}_covering ON {table} (id) INCLUDE (name, email);\n\n\
+         -- Concurrent index creation (doesn't lock writes)\n\
+         CREATE INDEX CONCURRENTLY idx_{table_short}_concurrent ON {table} (column_name);"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Generate full CRUD operations for a table, using schema columns when available.
+fn generate_crud_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table = selected.trim().to_string();
+
+    // Try to get columns from schema
+    let columns = workspace.panel::<ConnectionPanel>(cx).and_then(|cp| {
+        let panel = cp.read(cx);
+        let tree = panel.schema_tree()?;
+        for schema in &tree.schemas {
+            for t in schema.tables.iter().chain(schema.views.iter()) {
+                if t.info.name == table || t.info.qualified_name() == table {
+                    return Some(t.columns.clone());
+                }
+            }
+        }
+        None
+    });
+
+    let mut sql = format!("-- CRUD Operations for {table}\n\n");
+
+    if let Some(cols) = &columns {
+        let all_cols = cols
+            .iter()
+            .map(|c| format!("\"{}\"", c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let non_pk_cols: Vec<&pgblade_core::schema::ColumnInfo> =
+            cols.iter().filter(|c| !c.is_primary_key).collect();
+        let pk_cols: Vec<&pgblade_core::schema::ColumnInfo> =
+            cols.iter().filter(|c| c.is_primary_key).collect();
+
+        // SELECT
+        sql.push_str(&format!("-- READ\nSELECT {all_cols}\nFROM {table}\nWHERE "));
+        if let Some(pk) = pk_cols.first() {
+            sql.push_str(&format!("\"{}\" = $1", pk.name));
+        } else {
+            sql.push_str("/* condition */");
+        }
+        sql.push_str(";\n\n");
+
+        // INSERT
+        let insert_cols = non_pk_cols
+            .iter()
+            .map(|c| format!("\"{}\"", c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let placeholders: Vec<String> = (1..=non_pk_cols.len()).map(|i| format!("${i}")).collect();
+        sql.push_str(&format!(
+            "-- CREATE\nINSERT INTO {table} ({insert_cols})\nVALUES ({})\nRETURNING *;\n\n",
+            placeholders.join(", ")
+        ));
+
+        // UPDATE
+        let set_clauses: Vec<String> = non_pk_cols
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("\"{}\" = ${}", c.name, i + 1))
+            .collect();
+        sql.push_str(&format!(
+            "-- UPDATE\nUPDATE {table}\nSET {}\nWHERE ",
+            set_clauses.join(", ")
+        ));
+        if let Some(pk) = pk_cols.first() {
+            sql.push_str(&format!("\"{}\" = ${}", pk.name, non_pk_cols.len() + 1));
+        } else {
+            sql.push_str("/* condition */");
+        }
+        sql.push_str("\nRETURNING *;\n\n");
+
+        // DELETE
+        sql.push_str(&format!("-- DELETE\nDELETE FROM {table}\nWHERE "));
+        if let Some(pk) = pk_cols.first() {
+            sql.push_str(&format!("\"{}\" = $1", pk.name));
+        } else {
+            sql.push_str("/* condition */");
+        }
+        sql.push_str("\nRETURNING *;\n\n");
+
+        // UPSERT
+        if let Some(pk) = pk_cols.first() {
+            sql.push_str(&format!(
+                "-- UPSERT\nINSERT INTO {table} ({all_cols})\nVALUES ({})\nON CONFLICT (\"{}\") DO UPDATE SET\n{}\nRETURNING *;\n",
+                (1..=cols.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", "),
+                pk.name,
+                non_pk_cols.iter().map(|c| format!("\"{}\" = EXCLUDED.\"{}\"", c.name, c.name)).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    } else {
+        sql.push_str(
+            "-- Connect to a database and select a table name to generate schema-aware CRUD\n\n",
+        );
+        sql.push_str(&format!(
+            "-- READ\nSELECT * FROM {table} WHERE id = $1;\n\n"
+        ));
+        sql.push_str(&format!(
+            "-- CREATE\nINSERT INTO {table} (col1, col2) VALUES ($1, $2) RETURNING *;\n\n"
+        ));
+        sql.push_str(&format!(
+            "-- UPDATE\nUPDATE {table} SET col1 = $1 WHERE id = $2 RETURNING *;\n\n"
+        ));
+        sql.push_str(&format!(
+            "-- DELETE\nDELETE FROM {table} WHERE id = $1 RETURNING *;\n"
+        ));
+    }
+
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Show database event triggers.
+fn view_event_triggers_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        evtname AS trigger_name, \
+        evtevent AS event, \
+        evtowner::regrole AS owner, \
+        evtfoid::regproc AS function, \
+        evtenabled AS enabled, \
+        evttags AS tags \
+    FROM pg_event_trigger \
+    ORDER BY evtname";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show logical replication publications.
+fn view_publications_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pubname AS publication, \
+        pubowner::regrole AS owner, \
+        puballtables AS all_tables, \
+        pubinsert AS inserts, \
+        pubupdate AS updates, \
+        pubdelete AS deletes, \
+        pubtruncate AS truncates \
+    FROM pg_publication \
+    ORDER BY pubname";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show logical replication subscriptions.
+fn view_subscriptions_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        subname AS subscription, \
+        subowner::regrole AS owner, \
+        subenabled AS enabled, \
+        subconninfo AS connection_info, \
+        subpublications AS publications \
+    FROM pg_subscription \
+    ORDER BY subname";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Generate connection strings in various formats for the current connection.
+fn generate_connection_strings_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(profile) = conn_panel.read(cx).connected_profile() else {
+        insert_into_editor(workspace, "-- Connect to a database first", window, cx);
+        return;
+    };
+
+    let h = &profile.host;
+    let p = profile.port;
+    let d = &profile.database;
+    let u = &profile.username;
+
+    let sql = format!(
+        "-- Connection strings for {d}@{h}\n\n\
+         -- PostgreSQL URI\n\
+         postgresql://{u}:PASSWORD@{h}:{p}/{d}\n\n\
+         -- JDBC\n\
+         jdbc:postgresql://{h}:{p}/{d}?user={u}&password=PASSWORD\n\n\
+         -- .NET / Npgsql\n\
+         Host={h};Port={p};Database={d};Username={u};Password=PASSWORD\n\n\
+         -- Python (psycopg2)\n\
+         dbname='{d}' user='{u}' host='{h}' port='{p}' password='PASSWORD'\n\n\
+         -- Node.js\n\
+         {{ host: '{h}', port: {p}, database: '{d}', user: '{u}', password: 'PASSWORD' }}\n\n\
+         -- Go (lib/pq)\n\
+         postgres://{u}:PASSWORD@{h}:{p}/{d}?sslmode=disable\n\n\
+         -- Rust (tokio-postgres)\n\
+         host='{h}' port={p} dbname='{d}' user='{u}' password='PASSWORD'\n\n\
+         -- Environment variable\n\
+         DATABASE_URL=postgresql://{u}:PASSWORD@{h}:{p}/{d}"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Generate partition management templates for a table name selected in the editor.
+fn partition_template_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table = selected.trim();
+
+    let sql = format!(
+        "-- Partition management for {table}\n\n\
+         -- Create partitioned table (range)\n\
+         CREATE TABLE {table}_partitioned (\n\
+         \tid SERIAL,\n\
+         \tcreated_at TIMESTAMPTZ NOT NULL,\n\
+         \tdata TEXT\n\
+         ) PARTITION BY RANGE (created_at);\n\n\
+         -- Create partitions\n\
+         CREATE TABLE {table}_2026_q1 PARTITION OF {table}_partitioned\n\
+         \tFOR VALUES FROM ('2026-01-01') TO ('2026-04-01');\n\
+         CREATE TABLE {table}_2026_q2 PARTITION OF {table}_partitioned\n\
+         \tFOR VALUES FROM ('2026-04-01') TO ('2026-07-01');\n\n\
+         -- Create partition (list)\n\
+         -- CREATE TABLE {table}_list (\n\
+         --     region TEXT NOT NULL,\n\
+         --     data TEXT\n\
+         -- ) PARTITION BY LIST (region);\n\
+         -- CREATE TABLE {table}_us PARTITION OF {table}_list FOR VALUES IN ('us-east', 'us-west');\n\n\
+         -- Detach partition\n\
+         -- ALTER TABLE {table}_partitioned DETACH PARTITION {table}_2026_q1;\n\n\
+         -- Attach partition\n\
+         -- ALTER TABLE {table}_partitioned ATTACH PARTITION {table}_2026_q1\n\
+         --     FOR VALUES FROM ('2026-01-01') TO ('2026-04-01');"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
 }
