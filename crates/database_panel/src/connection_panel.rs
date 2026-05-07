@@ -25,6 +25,27 @@ use pgblade_security::KeychainStore;
 use crate::ResultPanel;
 use crate::SqlCompletionProvider;
 
+/// Escape a string for use inside a SQL single-quoted literal.
+/// Handles single quotes and backslashes.
+pub(crate) fn escape_sql_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "''")
+}
+
+/// Escape a string for use in a LIKE/ILIKE pattern inside a SQL literal.
+/// Escapes single quotes, backslashes, and LIKE wildcards (% and _).
+pub(crate) fn escape_sql_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "''")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Escape a string for use inside a double-quoted SQL identifier.
+#[allow(dead_code)]
+pub(crate) fn escape_sql_identifier(s: &str) -> String {
+    s.replace('"', "\"\"")
+}
+
 actions!(database_panel, [ToggleFocus, AddConnection]);
 
 pub fn register(workspace: &mut Workspace) {
@@ -699,6 +720,25 @@ impl ConnectionPanel {
         cx.notify();
     }
 
+    /// Returns a formatted status bar string showing connection info and uptime.
+    pub fn status_bar_text(&self) -> Option<String> {
+        let profile = self.connected_profile.as_ref()?;
+        let uptime = self
+            .connected_at
+            .map(|t| {
+                let secs = t.elapsed().as_secs();
+                if secs < 60 {
+                    format!("{secs}s")
+                } else if secs < 3600 {
+                    format!("{}m", secs / 60)
+                } else {
+                    format!("{}h", secs / 3600)
+                }
+            })
+            .unwrap_or_default();
+        Some(format!("{}@{} ({uptime})", profile.database, profile.host))
+    }
+
     fn delete_connection(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(conn) = self.saved_connections.get(index) {
             let id = conn.id;
@@ -942,7 +982,7 @@ impl ConnectionPanel {
 
     /// Show the SQL definition of a view or materialized view.
     fn show_view_definition(&self, view_name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let safe_name = view_name.replace('\'', "''");
+        let safe_name = escape_sql_string(view_name);
         let sql = format!(
             "SELECT definition FROM pg_views WHERE viewname = '{safe_name}' \
              UNION ALL \
@@ -963,8 +1003,8 @@ impl ConnectionPanel {
             return;
         };
         let runtime = self.runtime.clone();
-        let safe_name = func_name.replace('\'', "''");
-        let safe_schema = schema.replace('\'', "''");
+        let safe_name = escape_sql_string(func_name);
+        let safe_schema = escape_sql_string(schema);
         let sql = format!(
             "SELECT pg_get_functiondef(p.oid) AS definition \
              FROM pg_proc p \
@@ -1032,9 +1072,9 @@ impl ConnectionPanel {
             return;
         };
         let runtime = self.runtime.clone();
-        let safe_trigger = trigger_name.replace('\'', "''");
-        let safe_table = table_name.replace('\'', "''");
-        let safe_schema = schema.replace('\'', "''");
+        let safe_trigger = escape_sql_string(trigger_name);
+        let safe_table = escape_sql_string(table_name);
+        let safe_schema = escape_sql_string(schema);
         let sql = format!(
             "SELECT pg_get_triggerdef(t.oid, true) AS definition \
              FROM pg_trigger t \

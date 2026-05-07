@@ -20,6 +20,12 @@ pub struct SqlCompletionProvider {
     items: RefCell<Vec<SqlCompletionItem>>,
 }
 
+impl Default for SqlCompletionProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SqlCompletionProvider {
     pub fn new() -> Self {
         Self {

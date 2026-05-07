@@ -749,23 +749,20 @@ fn search_objects_action(
     }
 
     // Sanitize the search term to prevent SQL injection
-    let safe_term = term
-        .replace('\'', "''")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
+    let safe_term = connection_panel::escape_sql_like(term);
 
     let sql = format!(
         "SELECT 'TABLE' as type, table_schema as schema, table_name as name, '' as detail \
          FROM information_schema.tables \
-         WHERE table_name ILIKE '%{safe_term}%' AND table_schema NOT IN ('pg_catalog', 'information_schema') \
+         WHERE table_name ILIKE '%{safe_term}%' ESCAPE '\\' AND table_schema NOT IN ('pg_catalog', 'information_schema') \
          UNION ALL \
          SELECT 'COLUMN', table_schema, table_name || '.' || column_name, data_type \
          FROM information_schema.columns \
-         WHERE column_name ILIKE '%{safe_term}%' AND table_schema NOT IN ('pg_catalog', 'information_schema') \
+         WHERE column_name ILIKE '%{safe_term}%' ESCAPE '\\' AND table_schema NOT IN ('pg_catalog', 'information_schema') \
          UNION ALL \
          SELECT 'FUNCTION', n.nspname, p.proname, pg_get_function_result(p.oid) \
          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE p.proname ILIKE '%{safe_term}%' AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+         WHERE p.proname ILIKE '%{safe_term}%' ESCAPE '\\' AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
          ORDER BY type, name \
          LIMIT 50"
     );
@@ -1300,7 +1297,7 @@ fn view_definition_action(
         return;
     };
     let view_name = selected.trim();
-    let safe_name = view_name.replace('\'', "''");
+    let safe_name = connection_panel::escape_sql_string(view_name);
 
     let sql = format!(
         "SELECT definition FROM pg_views WHERE viewname = '{safe_name}' \
@@ -1326,7 +1323,7 @@ fn column_stats_action(
     let Some(selected) = get_sql_from_editor(&editor, cx) else {
         return;
     };
-    let table_name = selected.trim().replace('\'', "''");
+    let table_name = connection_panel::escape_sql_string(selected.trim());
 
     let sql = format!(
         "SELECT \
@@ -1449,7 +1446,7 @@ fn view_dependencies_action(
     let Some(selected) = get_sql_from_editor(&editor, cx) else {
         return;
     };
-    let table_name = selected.trim().replace('\'', "''");
+    let table_name = connection_panel::escape_sql_string(selected.trim());
 
     let sql = format!(
         "SELECT DISTINCT \
@@ -1960,18 +1957,18 @@ fn insert_into_editor(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    if let Some(active_item) = workspace.active_item(cx) {
-        if let Some(editor) = active_item.act_as::<Editor>(cx) {
-            editor.update(cx, |editor, cx| {
-                let prefix = if editor.text(cx).is_empty() {
-                    ""
-                } else {
-                    "\n\n"
-                };
-                editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
-                editor.insert(&format!("{prefix}{sql}"), window, cx);
-            });
-        }
+    if let Some(active_item) = workspace.active_item(cx)
+        && let Some(editor) = active_item.act_as::<Editor>(cx)
+    {
+        editor.update(cx, |editor, cx| {
+            let prefix = if editor.text(cx).is_empty() {
+                ""
+            } else {
+                "\n\n"
+            };
+            editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+            editor.insert(&format!("{prefix}{sql}"), window, cx);
+        });
     }
 }
 
@@ -2057,7 +2054,7 @@ fn table_structure_action(
     let Some(selected) = get_sql_from_editor(&editor, cx) else {
         return;
     };
-    let table_name = selected.trim().replace('\'', "''");
+    let table_name = connection_panel::escape_sql_string(selected.trim());
 
     let sql = format!(
         "SELECT \

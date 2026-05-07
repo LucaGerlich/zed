@@ -321,9 +321,9 @@ impl ResultPanel {
         trimmed.chars().take(25).collect()
     }
 
-    /// Get the active tab's state.
-    fn active_state(&self) -> &ResultState {
-        &self.tabs[self.active_tab].state
+    /// Get the active tab's state, if any tab exists.
+    fn active_state(&self) -> Option<&ResultState> {
+        self.tabs.get(self.active_tab).map(|tab| &tab.state)
     }
 
     /// Close a tab by index. Allows closing the last tab (returns to empty state).
@@ -339,7 +339,9 @@ impl ResultPanel {
 
     /// Re-execute the query that produced the current tab's results.
     fn refresh_current_tab(&mut self, cx: &mut Context<Self>) {
-        let tab = &self.tabs[self.active_tab];
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
         let Some(sql) = tab.sql.clone() else {
             return;
         };
@@ -351,8 +353,10 @@ impl ResultPanel {
         };
         let row_limit = tab.row_limit;
 
-        self.tabs[self.active_tab].state = ResultState::Loading;
-        self.tabs[self.active_tab].has_more = false;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.state = ResultState::Loading;
+            tab.has_more = false;
+        }
         self.filter_text.clear();
         cx.notify();
 
@@ -411,7 +415,9 @@ impl ResultPanel {
 
     /// Load more rows by re-executing with a higher limit.
     fn load_more(&mut self, cx: &mut Context<Self>) {
-        let tab = &mut self.tabs[self.active_tab];
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
         let Some(sql) = tab.sql.clone() else {
             return;
         };
@@ -424,9 +430,11 @@ impl ResultPanel {
 
         // Increase the limit
         let new_limit = tab.row_limit + 500;
-        tab.row_limit = new_limit;
-        tab.state = ResultState::Loading;
-        tab.has_more = false;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.row_limit = new_limit;
+            tab.state = ResultState::Loading;
+            tab.has_more = false;
+        }
         cx.notify();
 
         let tab_idx = self.active_tab;
@@ -483,7 +491,9 @@ impl ResultPanel {
 
     /// Load all rows by re-executing the query without any automatic LIMIT.
     fn load_all(&mut self, cx: &mut Context<Self>) {
-        let tab = &mut self.tabs[self.active_tab];
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
         let Some(sql) = tab.sql.clone() else {
             return;
         };
@@ -494,8 +504,10 @@ impl ResultPanel {
             return;
         };
 
-        tab.state = ResultState::Loading;
-        tab.has_more = false;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.state = ResultState::Loading;
+            tab.has_more = false;
+        }
         cx.notify();
 
         let tab_idx = self.active_tab;
@@ -563,7 +575,9 @@ impl ResultPanel {
         let Some(row_idx) = self.selected_row else {
             return;
         };
-        let tab = &self.tabs[self.active_tab];
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
         let ResultState::Success { columns, rows, .. } = &tab.state else {
             return;
         };
@@ -635,7 +649,9 @@ impl ResultPanel {
         let Some(row_idx) = self.selected_row else {
             return;
         };
-        let tab = &self.tabs[self.active_tab];
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
         let ResultState::Success { columns, rows, .. } = &tab.state else {
             return;
         };
@@ -747,7 +763,7 @@ impl ResultPanel {
 
     /// Export current result set as CSV to clipboard.
     fn export_csv(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
         let csv = Self::build_csv(columns, rows);
@@ -756,7 +772,7 @@ impl ResultPanel {
 
     /// Export current result set as JSON to clipboard.
     fn export_json(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
         let json = Self::build_json(columns, rows);
@@ -765,7 +781,7 @@ impl ResultPanel {
 
     /// Export current result set as CSV to a file in ~/Downloads.
     fn export_csv_to_file(&self, _cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
         let csv = Self::build_csv(columns, rows);
@@ -789,7 +805,7 @@ impl ResultPanel {
 
     /// Export current result set as JSON to a file in ~/Downloads.
     fn export_json_to_file(&self, _cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
         let json = Self::build_json(columns, rows);
@@ -813,7 +829,7 @@ impl ResultPanel {
 
     /// Export current result set as INSERT statements to clipboard.
     fn export_insert(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
 
@@ -870,7 +886,7 @@ impl ResultPanel {
 
     /// Export current result set as UPDATE statements to clipboard.
     fn export_update(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
 
@@ -895,7 +911,7 @@ impl ResultPanel {
 
     /// Export current result set as DELETE statements to clipboard.
     fn export_delete(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
 
@@ -920,7 +936,9 @@ impl ResultPanel {
     /// Return rows sorted by the currently selected column, or in original
     /// order when no sort column is active.
     fn sorted_rows(&self, rows: &[Vec<CellValue>]) -> Vec<Vec<CellValue>> {
-        let tab = &self.tabs[self.active_tab];
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return rows.to_vec();
+        };
         let Some(col_idx) = tab.sort_column else {
             return rows.to_vec();
         };
@@ -963,7 +981,7 @@ impl ResultPanel {
         if self.tabs.is_empty() {
             return;
         }
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+        let Some(ResultState::Success { columns, rows, .. }) = self.active_state() else {
             return;
         };
 
@@ -1010,9 +1028,10 @@ impl ResultPanel {
                     cx.theme().colors().tab_inactive_background
                 };
                 let idx = i;
-                // Truncate label to 25 chars for preview
-                let display_label: String = if tab.label.len() > 25 {
-                    format!("{}...", &tab.label[..25])
+                // Truncate label to 25 chars for preview (Unicode-safe)
+                let display_label: String = if tab.label.chars().count() > 25 {
+                    let truncated: String = tab.label.chars().take(25).collect();
+                    format!("{truncated}...")
                 } else {
                     tab.label.clone()
                 };
@@ -1111,15 +1130,18 @@ impl ResultPanel {
     }
 
     fn render_error(&self, message: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let tab = &self.tabs[self.active_tab];
-        let sql_preview = tab.sql.as_ref().map(|s| {
-            let preview: String = s.chars().take(200).collect();
-            if s.len() > 200 {
-                format!("{preview}...")
-            } else {
-                preview
-            }
-        });
+        let sql_preview = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.sql.as_ref())
+            .map(|s| {
+                let preview: String = s.chars().take(200).collect();
+                if s.len() > 200 {
+                    format!("{preview}...")
+                } else {
+                    preview
+                }
+            });
 
         let suggestion = if message.contains("42P01") {
             Some("Table not found. Check the table name and schema.")
@@ -1243,7 +1265,8 @@ impl ResultPanel {
                             .style(ButtonStyle::Subtle)
                             .tooltip(Tooltip::text("Copy DDL"))
                             .on_click(cx.listener(move |this, _, _window, cx| {
-                                if let ResultState::Ddl(ref ddl) = this.tabs[this.active_tab].state
+                                if let Some(tab) = this.tabs.get(this.active_tab)
+                                    && let ResultState::Ddl(ref ddl) = tab.state
                                 {
                                     cx.write_to_clipboard(ClipboardItem::new_string(ddl.clone()));
                                 }
@@ -1387,8 +1410,12 @@ impl ResultPanel {
                 .into_any_element(),
         ];
 
-        let active_sort_column = self.tabs[self.active_tab].sort_column;
-        let active_sort_ascending = self.tabs[self.active_tab].sort_ascending;
+        let active_sort_column = self.tabs.get(self.active_tab).and_then(|t| t.sort_column);
+        let active_sort_ascending = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.sort_ascending)
+            .unwrap_or(true);
 
         for (i, col) in columns.iter().enumerate() {
             let col_idx = i;
@@ -1404,14 +1431,15 @@ impl ResultPanel {
                     .id(SharedString::from(format!("col-h-{i}")))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _window, cx| {
-                        let tab = &mut this.tabs[this.active_tab];
-                        if tab.sort_column == Some(col_idx) {
-                            tab.sort_ascending = !tab.sort_ascending;
-                        } else {
-                            tab.sort_column = Some(col_idx);
-                            tab.sort_ascending = true;
+                        if let Some(tab) = this.tabs.get_mut(this.active_tab) {
+                            if tab.sort_column == Some(col_idx) {
+                                tab.sort_ascending = !tab.sort_ascending;
+                            } else {
+                                tab.sort_column = Some(col_idx);
+                                tab.sort_ascending = true;
+                            }
+                            cx.notify();
                         }
-                        cx.notify();
                     }))
                     .child(
                         Label::new(format!("{}{sort_indicator}", col.name))
@@ -1455,7 +1483,13 @@ impl ResultPanel {
                                 let (text, color) = match cell {
                                     CellValue::Null => ("NULL".to_string(), Color::Disabled),
                                     _ => {
-                                        let display = cell.display();
+                                        let raw = cell.display();
+                                        let display = if raw.chars().count() > 500 {
+                                            let truncated: String = raw.chars().take(500).collect();
+                                            format!("{truncated}...")
+                                        } else {
+                                            raw
+                                        };
                                         let col_type = columns
                                             .get(col_i)
                                             .map(|c| c.type_name.as_str())
@@ -1733,12 +1767,13 @@ impl Render for ResultPanel {
                     return;
                 }
                 // Typing characters adds to filter
-                if let Some(ref ch) = event.keystroke.key_char {
-                    if !event.keystroke.modifiers.platform && !event.keystroke.modifiers.control {
-                        this.filter_text.push_str(ch);
-                        this.selected_row = None;
-                        cx.notify();
-                    }
+                if let Some(ref ch) = event.keystroke.key_char
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                {
+                    this.filter_text.push_str(ch);
+                    this.selected_row = None;
+                    cx.notify();
                 }
             }));
 
@@ -1751,7 +1786,10 @@ impl Render for ResultPanel {
         panel = panel.child(self.render_tab_bar(cx));
 
         // Clone state data needed for rendering to avoid borrow issues
-        let state = self.tabs[self.active_tab].state.clone();
+        let Some(state) = self.tabs.get(self.active_tab).map(|t| t.state.clone()) else {
+            // Tab was removed between the empty check and here (shouldn't happen, but be safe)
+            return panel.child(self.render_empty(cx));
+        };
         let content = match state {
             ResultState::Loading => self.render_loading(cx).into_any_element(),
             ResultState::Error(msg) => self.render_error(&msg, cx).into_any_element(),
@@ -1841,22 +1879,22 @@ fn format_explain_plan(json_text: &str) -> String {
     };
 
     // Add execution summary at the top
-    if let Some(plan_entry) = plan_array.first() {
-        if let Some(plan_node) = plan_entry.get("Plan") {
-            let total_time = plan_node
-                .get("Actual Total Time")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let total_rows = plan_node
-                .get("Actual Rows")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            output.push_str(&format!("=== Execution Summary ===\n"));
-            output.push_str(&format!(
-                "Total Time: {:.3}ms | Rows: {}\n\n",
-                total_time, total_rows
-            ));
-        }
+    if let Some(plan_entry) = plan_array.first()
+        && let Some(plan_node) = plan_entry.get("Plan")
+    {
+        let total_time = plan_node
+            .get("Actual Total Time")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total_rows = plan_node
+            .get("Actual Rows")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        output.push_str("=== Execution Summary ===\n");
+        output.push_str(&format!(
+            "Total Time: {:.3}ms | Rows: {}\n\n",
+            total_time, total_rows
+        ));
     }
 
     for plan_entry in plan_array {
