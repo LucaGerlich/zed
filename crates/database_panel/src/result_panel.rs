@@ -13,7 +13,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use pgblade_core::driver::DatabaseSession;
 use pgblade_core::result::{CellValue, ColumnMeta};
 
-actions!(database_result_panel, [ToggleFocus]);
+actions!(database_result_panel, [ToggleFocus, ToggleDataMasking]);
 
 /// Events emitted by the ResultPanel for cross-panel communication.
 #[derive(Debug, Clone)]
@@ -60,6 +60,8 @@ pub(crate) struct ResultTab {
     row_limit: usize,
     /// Whether the last query returned exactly the limit (more rows likely available).
     has_more: bool,
+    /// When true, this tab is pinned and won't be auto-closed or cleared.
+    pinned: bool,
 }
 
 pub struct ResultPanel {
@@ -73,6 +75,8 @@ pub struct ResultPanel {
     table_interaction: Entity<TableInteractionState>,
     /// Filter text for live row filtering.
     filter_text: String,
+    /// When true, sensitive-looking columns are masked in the display.
+    data_masking_enabled: bool,
 }
 
 impl ResultPanel {
@@ -86,6 +90,7 @@ impl ResultPanel {
             selected_row: None,
             table_interaction,
             filter_text: String::new(),
+            data_masking_enabled: false,
         }
     }
 
@@ -124,6 +129,7 @@ impl ResultPanel {
             runtime: Some(runtime.clone()),
             row_limit,
             has_more: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -216,6 +222,7 @@ impl ResultPanel {
             runtime: None,
             row_limit: 500,
             has_more: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -236,6 +243,7 @@ impl ResultPanel {
             runtime: None,
             row_limit: 500,
             has_more: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -262,6 +270,7 @@ impl ResultPanel {
             runtime: None,
             row_limit: 500,
             has_more: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -346,8 +355,13 @@ impl ResultPanel {
         self.tabs.get(self.active_tab).map(|tab| &tab.state)
     }
 
-    /// Close a tab by index. Allows closing the last tab (returns to empty state).
+    /// Close a tab by index. Pinned tabs are skipped.
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(index) {
+            if tab.pinned {
+                return;
+            }
+        }
         self.tabs.remove(index);
         self.selected_row = None;
         self.filter_text.clear();
@@ -571,12 +585,20 @@ impl ResultPanel {
         .detach();
     }
 
-    /// Clear all result tabs and reset to empty state.
+    /// Clear all unpinned result tabs. Pinned tabs are retained.
     fn clear_all(&mut self, cx: &mut Context<Self>) {
-        self.tabs.clear();
+        self.tabs.retain(|tab| tab.pinned);
         self.selected_row = None;
         self.filter_text.clear();
-        self.active_tab = 0;
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        }
+        cx.notify();
+    }
+
+    /// Toggle data masking for sensitive columns in query results.
+    fn toggle_data_masking(&mut self, cx: &mut Context<Self>) {
+        self.data_masking_enabled = !self.data_masking_enabled;
         cx.notify();
     }
 
@@ -659,6 +681,7 @@ impl ResultPanel {
             runtime,
             row_limit: 500,
             has_more: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -723,6 +746,7 @@ impl ResultPanel {
             runtime,
             row_limit: 500,
             has_more: false,
+            pinned: false,
         });
         self.active_tab = self.tabs.len() - 1;
         cx.notify();
@@ -1042,6 +1066,7 @@ impl ResultPanel {
             .overflow_hidden()
             .children(self.tabs.iter().enumerate().map(|(i, tab)| {
                 let is_active = i == self.active_tab;
+                let is_pinned = tab.pinned;
                 let bg = if is_active {
                     cx.theme().colors().tab_active_background
                 } else {
@@ -1080,6 +1105,27 @@ impl ResultPanel {
                             } else {
                                 Color::Muted
                             }),
+                    )
+                    .child(
+                        IconButton::new(SharedString::from(format!("pin-tab-{i}")), IconName::Pin)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(if is_pinned {
+                                Color::Accent
+                            } else {
+                                Color::Disabled
+                            })
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text(if is_pinned {
+                                "Unpin tab"
+                            } else {
+                                "Pin tab"
+                            }))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                if let Some(tab) = this.tabs.get_mut(idx) {
+                                    tab.pinned = !tab.pinned;
+                                }
+                                cx.notify();
+                            })),
                     )
                     .child(
                         IconButton::new(
@@ -1480,6 +1526,8 @@ impl ResultPanel {
 
         let selection_bg = cx.theme().colors().element_selected;
 
+        let masking_enabled = self.data_masking_enabled;
+
         let table = Table::new(col_count)
             .header(header_cells)
             .striped()
@@ -1500,6 +1548,8 @@ impl ResultPanel {
                             ];
 
                             for (col_i, cell) in row.iter().enumerate() {
+                                let col_name =
+                                    columns.get(col_i).map(|c| c.name.as_str()).unwrap_or("");
                                 let (text, color) = match cell {
                                     CellValue::Null => ("NULL".to_string(), Color::Disabled),
                                     _ => {
@@ -1510,6 +1560,8 @@ impl ResultPanel {
                                         } else {
                                             raw
                                         };
+                                        let display =
+                                            mask_cell_display(&display, col_name, masking_enabled);
                                         let col_type = columns
                                             .get(col_i)
                                             .map(|c| c.type_name.as_str())
@@ -1678,7 +1730,24 @@ impl ResultPanel {
                 );
         }
 
+        let masking_active = self.data_masking_enabled;
         buttons = buttons
+            .child(
+                Button::new(
+                    "toggle-masking",
+                    if masking_active {
+                        "Mask: ON"
+                    } else {
+                        "Mask: OFF"
+                    },
+                )
+                .style(ButtonStyle::Subtle)
+                .label_size(LabelSize::XSmall)
+                .tooltip(Tooltip::text(
+                    "Toggle data masking for sensitive columns (passwords, tokens, emails, etc.)",
+                ))
+                .on_click(cx.listener(|this, _, _window, cx| this.toggle_data_masking(cx))),
+            )
             .child(
                 IconButton::new("refresh-btn", IconName::RefreshTitle)
                     .icon_size(IconSize::XSmall)
@@ -1747,6 +1816,52 @@ impl ResultPanel {
 
         footer = footer.child(buttons);
         footer
+    }
+}
+
+/// Mask a cell's display value when data masking is enabled.
+/// Fully masks sensitive columns (passwords, tokens, etc.) and partially masks PII columns.
+fn mask_cell_display(value: &str, column_name: &str, masking_enabled: bool) -> String {
+    if !masking_enabled {
+        return value.to_string();
+    }
+
+    let name_lower = column_name.to_lowercase();
+
+    let is_sensitive = [
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "access_key",
+        "private_key",
+        "credit_card",
+        "card_number",
+        "cvv",
+        "ssn",
+        "social_security",
+    ]
+    .iter()
+    .any(|p| name_lower.contains(p));
+
+    let is_pii = ["email", "phone", "mobile", "address", "birth", "dob"]
+        .iter()
+        .any(|p| name_lower.contains(p));
+
+    if is_sensitive {
+        "****".to_string()
+    } else if is_pii && value.len() > 4 {
+        let end = value
+            .char_indices()
+            .nth(2)
+            .map(|(i, _)| i)
+            .unwrap_or(value.len());
+        format!("{}***", &value[..end])
+    } else {
+        value.to_string()
     }
 }
 

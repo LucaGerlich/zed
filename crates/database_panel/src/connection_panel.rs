@@ -771,6 +771,11 @@ impl ConnectionPanel {
         cx.notify();
     }
 
+    /// Returns the environment of the currently connected profile, if any.
+    pub fn connection_environment(&self) -> Option<Environment> {
+        self.connected_profile.as_ref().map(|p| p.environment)
+    }
+
     /// Returns a formatted status bar string showing connection info and uptime.
     pub fn status_bar_text(&self) -> Option<String> {
         let profile = self.connected_profile.as_ref()?;

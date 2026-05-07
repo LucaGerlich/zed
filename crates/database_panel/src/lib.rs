@@ -543,11 +543,59 @@ fn get_sql_from_editor(editor: &Entity<Editor>, cx: &mut Context<Workspace>) -> 
         }
     });
 
-    if sql.trim().is_empty() {
-        None
-    } else {
-        Some(sql)
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+
+    // Strip common string delimiters from code files
+    let cleaned = strip_string_delimiters(trimmed);
+
+    Some(cleaned)
+}
+
+/// Strip common string delimiters so SQL selected inside Python, JS, Rust, Go,
+/// etc. source files can be executed directly.
+fn strip_string_delimiters(s: &str) -> String {
+    let trimmed = s.trim();
+
+    // Triple-quoted strings (Python, etc.)
+    if trimmed.starts_with("\"\"\"") && trimmed.ends_with("\"\"\"") && trimmed.len() >= 6 {
+        return trimmed[3..trimmed.len() - 3].trim().to_string();
+    }
+    if trimmed.starts_with("'''") && trimmed.ends_with("'''") && trimmed.len() >= 6 {
+        return trimmed[3..trimmed.len() - 3].trim().to_string();
+    }
+
+    // Rust raw strings: r##"..."## (check before r#"..."#)
+    if trimmed.starts_with("r##\"") && trimmed.ends_with("\"##") && trimmed.len() >= 7 {
+        return trimmed[4..trimmed.len() - 3].trim().to_string();
+    }
+    if trimmed.starts_with("r#\"") && trimmed.ends_with("\"#") && trimmed.len() >= 5 {
+        return trimmed[3..trimmed.len() - 2].trim().to_string();
+    }
+
+    // Template literals / Go raw strings (backticks)
+    if trimmed.starts_with('`') && trimmed.ends_with('`') && trimmed.len() >= 2 {
+        return trimmed[1..trimmed.len() - 1].trim().to_string();
+    }
+
+    // Regular double or single quotes
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        return trimmed[1..trimmed.len() - 1].trim().to_string();
+    }
+
+    // Strip common string concatenation artifacts
+    trimmed
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\" +", "")
+        .replace("+ \"", "")
+        .replace("\" &", "")
+        .replace("& \"", "")
 }
 
 fn execute_query_action(

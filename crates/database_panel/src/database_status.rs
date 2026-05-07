@@ -2,6 +2,8 @@ use gpui::{Context, Empty, IntoElement, ParentElement, Render, Subscription, Wea
 use ui::{ButtonLike, Color, Icon, IconName, IconSize, Label, LabelSize, Tooltip, prelude::*};
 use workspace::{StatusItemView, Workspace, item::ItemHandle};
 
+use pgblade_core::connection::Environment;
+
 use crate::ConnectionPanel;
 
 /// A status bar item that displays the currently connected database.
@@ -56,8 +58,17 @@ impl Render for DatabaseStatusItem {
                 .into_any_element();
         };
 
-        // Connected: show database@host with a green-tinted icon and a tooltip
-        let tooltip_text: SharedString = format!("Connected: {status_text}").into();
+        // Determine icon color based on connection environment
+        let env = panel.connection_environment();
+        let icon_color = match env {
+            Some(Environment::Production) => Color::Error,
+            Some(Environment::Staging) => Color::Warning,
+            _ => Color::Success,
+        };
+        let env_label = env.map(|e| e.label()).unwrap_or("Unknown");
+
+        // Connected: show database@host with an environment-colored icon and a tooltip
+        let tooltip_text: SharedString = format!("Connected: {status_text} ({env_label})").into();
         ButtonLike::new("database-status")
             .child(
                 h_flex()
@@ -65,7 +76,7 @@ impl Render for DatabaseStatusItem {
                     .child(
                         Icon::new(IconName::DatabaseZap)
                             .size(IconSize::Small)
-                            .color(Color::Success),
+                            .color(icon_color),
                     )
                     .child(
                         Label::new(status_text)
