@@ -33,6 +33,7 @@ actions!(
         IndexUsage,
         ERDiagram,
         ImportCsv,
+        ImportCsvExecute,
         CompareSchemas,
         ViewExtensions,
         SqlComplete,
@@ -75,8 +76,12 @@ actions!(
         SnippetRecursiveCte,
         SnippetJsonQuery,
         SnippetLateralJoin,
+        SnippetSelectJoin,
+        SnippetGroupSummary,
         TableStructure,
-        GenerateAlterTable
+        GenerateAlterTable,
+        HealthCheck,
+        CopyQualifiedName
     ]
 );
 
@@ -393,6 +398,31 @@ pub fn init(cx: &mut App) {
             // Register the GenerateAlterTable action on the workspace
             workspace.register_action(|workspace, _: &GenerateAlterTable, window, cx| {
                 generate_alter_table_action(workspace, window, cx);
+            });
+
+            // Register the ImportCsvExecute action on the workspace
+            workspace.register_action(|workspace, _: &ImportCsvExecute, window, cx| {
+                import_csv_execute_action(workspace, window, cx);
+            });
+
+            // Register the SnippetSelectJoin action on the workspace
+            workspace.register_action(|workspace, _: &SnippetSelectJoin, window, cx| {
+                snippet_select_join_action(workspace, window, cx);
+            });
+
+            // Register the SnippetGroupSummary action on the workspace
+            workspace.register_action(|workspace, _: &SnippetGroupSummary, window, cx| {
+                snippet_group_summary_action(workspace, window, cx);
+            });
+
+            // Register the HealthCheck action on the workspace
+            workspace.register_action(|workspace, _: &HealthCheck, window, cx| {
+                health_check_action(workspace, window, cx);
+            });
+
+            // Register the CopyQualifiedName action on the workspace
+            workspace.register_action(|workspace, _: &CopyQualifiedName, _window, cx| {
+                copy_qualified_name_action(workspace, cx);
             });
 
             if let Some(window) = window {
@@ -2078,4 +2108,267 @@ fn generate_alter_table_action(
     );
 
     insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Import CSV data from the clipboard and execute the INSERT statements directly.
+/// Reads the target table name from the editor selection.
+fn import_csv_execute_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(clipboard) = cx.read_from_clipboard() else {
+        tracing::warn!("ImportCsvExecute: clipboard is empty");
+        return;
+    };
+    let Some(text) = clipboard.text() else {
+        tracing::warn!("ImportCsvExecute: clipboard has no text content");
+        return;
+    };
+    if text.trim().is_empty() {
+        tracing::warn!("ImportCsvExecute: clipboard text is empty");
+        return;
+    }
+
+    // Read table name from editor selection
+    let table_name = workspace
+        .active_item(cx)
+        .and_then(|item| item.act_as::<Editor>(cx))
+        .and_then(|editor| get_sql_from_editor(&editor, cx))
+        .unwrap_or_else(|| "your_table".to_string());
+    let table_name = table_name.trim().to_string();
+
+    let mut lines = text.lines();
+    let Some(header_line) = lines.next() else {
+        return;
+    };
+
+    let delimiter = if header_line.contains('\t') {
+        '\t'
+    } else {
+        ','
+    };
+    let headers: Vec<&str> = header_line.split(delimiter).map(|h| h.trim()).collect();
+    let col_list = headers
+        .iter()
+        .map(|h| format!("\"{}\"", h))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut all_sql = String::new();
+    let mut row_count = 0;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let values: Vec<&str> = line.split(delimiter).collect();
+        let value_list: Vec<String> = values
+            .iter()
+            .map(|v| {
+                let trimmed = v.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                    "NULL".to_string()
+                } else {
+                    format!("'{}'", trimmed.replace('\'', "''"))
+                }
+            })
+            .collect();
+        all_sql.push_str(&format!(
+            "INSERT INTO {table_name} ({col_list}) VALUES ({});\n",
+            value_list.join(", ")
+        ));
+        row_count += 1;
+    }
+
+    if row_count == 0 {
+        return;
+    }
+
+    // Execute the inserts
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(session) = conn_panel.read(cx).session() else {
+        tracing::warn!("ImportCsvExecute: no active database connection");
+        return;
+    };
+    let runtime = conn_panel.read(cx).runtime();
+
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| {
+            panel.execute_query(all_sql, session, runtime, cx);
+        });
+    }
+}
+
+/// Generate a SELECT query with JOINs based on foreign keys from the schema tree.
+fn snippet_select_join_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(schema_tree) = conn_panel.read(cx).schema_tree() else {
+        insert_into_editor(
+            workspace,
+            "-- Connect to a database first to generate JOINs",
+            window,
+            cx,
+        );
+        return;
+    };
+
+    // Find the first table with foreign keys and generate JOINs
+    let mut sql =
+        String::from("-- Auto-generated JOIN query from foreign keys\nSELECT\n    *\nFROM\n");
+    let mut found = false;
+
+    for schema in &schema_tree.schemas {
+        for table in &schema.tables {
+            if !table.foreign_keys.is_empty() {
+                sql.push_str(&format!(
+                    "    \"{}\".\"{}\" t1\n",
+                    schema.info.name, table.info.name
+                ));
+
+                for fk in &table.foreign_keys {
+                    let col = fk.columns.first().map(|s| s.as_str()).unwrap_or("?");
+                    let ref_col = fk
+                        .referenced_columns
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    sql.push_str(&format!(
+                        "    LEFT JOIN \"{}\" ON t1.\"{}\" = \"{}\".\"{}\"  -- {}\n",
+                        fk.referenced_table, col, fk.referenced_table, ref_col, fk.name
+                    ));
+                }
+                found = true;
+                break;
+            }
+        }
+        if found {
+            break;
+        }
+    }
+
+    if !found {
+        sql.push_str("    your_table t1\n    -- No foreign keys found in schema\n");
+    }
+
+    sql.push_str("LIMIT 100;");
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Generate a GROUP BY summary template for the selected table name.
+fn snippet_group_summary_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(table_name) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table = table_name.trim();
+
+    let sql = format!(
+        "-- Summary statistics for {table}\nSELECT\n    \
+        COUNT(*) AS total_rows,\n    \
+        COUNT(DISTINCT column_name) AS distinct_values,\n    \
+        MIN(column_name) AS min_value,\n    \
+        MAX(column_name) AS max_value,\n    \
+        AVG(numeric_column::numeric) AS avg_value\n\
+        FROM {table}\n-- GROUP BY grouping_column\n-- HAVING COUNT(*) > 1\n\
+        ORDER BY total_rows DESC;"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Run a comprehensive database health check and display results.
+fn health_check_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "WITH db_size AS ( \
+        SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size \
+    ), \
+    connections AS ( \
+        SELECT count(*) AS total_connections, \
+            count(*) FILTER (WHERE state = 'active') AS active, \
+            count(*) FILTER (WHERE state = 'idle') AS idle, \
+            count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx \
+        FROM pg_stat_activity WHERE datname = current_database() \
+    ), \
+    cache AS ( \
+        SELECT CASE WHEN sum(blks_hit) + sum(blks_read) > 0 \
+            THEN round(100.0 * sum(blks_hit) / (sum(blks_hit) + sum(blks_read)), 2) \
+            ELSE 0 END AS cache_hit_pct \
+        FROM pg_stat_database WHERE datname = current_database() \
+    ), \
+    tables AS ( \
+        SELECT count(*) AS table_count, \
+            sum(n_dead_tup) AS total_dead_tuples, \
+            count(*) FILTER (WHERE n_dead_tup > n_live_tup * 0.2) AS tables_need_vacuum \
+        FROM pg_stat_user_tables \
+    ), \
+    indexes AS ( \
+        SELECT count(*) AS total_indexes, \
+            count(*) FILTER (WHERE idx_scan = 0 AND indexrelname NOT LIKE '%_pkey') AS unused_indexes \
+        FROM pg_stat_user_indexes \
+    ) \
+    SELECT \
+        'Database Size' AS metric, db_size.database_size AS value FROM db_size \
+    UNION ALL SELECT 'Total Connections', connections.total_connections::text FROM connections \
+    UNION ALL SELECT 'Active Queries', connections.active::text FROM connections \
+    UNION ALL SELECT 'Idle Connections', connections.idle::text FROM connections \
+    UNION ALL SELECT 'Idle in Transaction', connections.idle_in_tx::text FROM connections \
+    UNION ALL SELECT 'Cache Hit Rate %', cache.cache_hit_pct::text FROM cache \
+    UNION ALL SELECT 'User Tables', tables.table_count::text FROM tables \
+    UNION ALL SELECT 'Dead Tuples', tables.total_dead_tuples::text FROM tables \
+    UNION ALL SELECT 'Tables Need VACUUM', tables.tables_need_vacuum::text FROM tables \
+    UNION ALL SELECT 'Total Indexes', indexes.total_indexes::text FROM indexes \
+    UNION ALL SELECT 'Unused Indexes', indexes.unused_indexes::text FROM indexes";
+
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Copy the selected text as a properly quoted SQL identifier to the clipboard.
+fn copy_qualified_name_action(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let trimmed = selected.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    // Quote it as a SQL identifier
+    let qualified = if trimmed.contains('.') {
+        let parts: Vec<&str> = trimmed.split('.').collect();
+        parts
+            .iter()
+            .map(|p| format!("\"{}\"", p.trim_matches('"')))
+            .collect::<Vec<_>>()
+            .join(".")
+    } else {
+        format!("\"{}\"", trimmed.trim_matches('"'))
+    };
+
+    cx.write_to_clipboard(ClipboardItem::new_string(qualified));
 }
