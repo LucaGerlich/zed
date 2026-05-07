@@ -4,7 +4,8 @@ use gpui::*;
 use tokio::runtime::Runtime;
 use ui::prelude::*;
 use ui::{
-    Button, ButtonStyle, IconButton, IconName, IconSize, Label, LabelCommon, LabelSize, Tooltip,
+    Button, ButtonStyle, IconButton, IconName, IconSize, Label, LabelCommon, LabelSize, Table,
+    TableInteractionState, Tooltip,
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -60,16 +61,23 @@ pub struct ResultPanel {
     active_tab: usize,
     /// Currently selected row index (for inline editing).
     selected_row: Option<usize>,
+    /// Table interaction state for the ui::Table component.
+    table_interaction: Entity<TableInteractionState>,
+    /// Filter text for live row filtering.
+    filter_text: String,
 }
 
 impl ResultPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let table_interaction = cx.new(|cx| TableInteractionState::new(cx));
         Self {
             focus_handle: cx.focus_handle(),
             active: false,
             tabs: Vec::new(),
             active_tab: 0,
             selected_row: None,
+            table_interaction,
+            filter_text: String::new(),
         }
     }
 
@@ -95,6 +103,7 @@ impl ResultPanel {
     ) {
         let label = Self::smart_label(&sql);
         self.selected_row = None;
+        self.filter_text.clear();
         let row_limit = 500usize;
         self.tabs.push(ResultTab {
             label,
@@ -171,6 +180,7 @@ impl ResultPanel {
         cx: &mut Context<Self>,
     ) {
         self.selected_row = None;
+        self.filter_text.clear();
         self.tabs.push(ResultTab {
             label: "Results".to_string(),
             state: ResultState::Success {
@@ -194,6 +204,7 @@ impl ResultPanel {
     /// Display DDL text in the result panel.
     pub fn show_ddl(&mut self, ddl: String, cx: &mut Context<Self>) {
         self.selected_row = None;
+        self.filter_text.clear();
         self.tabs.push(ResultTab {
             label: "DDL".to_string(),
             state: ResultState::Ddl(ddl),
@@ -219,6 +230,7 @@ impl ResultPanel {
         cx: &mut Context<Self>,
     ) {
         self.selected_row = None;
+        self.filter_text.clear();
         self.tabs.push(ResultTab {
             label: "Explain".to_string(),
             state: ResultState::Loading,
@@ -318,6 +330,7 @@ impl ResultPanel {
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         self.tabs.remove(index);
         self.selected_row = None;
+        self.filter_text.clear();
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len().saturating_sub(1);
         }
@@ -340,6 +353,7 @@ impl ResultPanel {
 
         self.tabs[self.active_tab].state = ResultState::Loading;
         self.tabs[self.active_tab].has_more = false;
+        self.filter_text.clear();
         cx.notify();
 
         let tab_idx = self.active_tab;
@@ -529,6 +543,7 @@ impl ResultPanel {
     fn clear_all(&mut self, cx: &mut Context<Self>) {
         self.tabs.clear();
         self.selected_row = None;
+        self.filter_text.clear();
         self.active_tab = 0;
         cx.notify();
     }
@@ -553,7 +568,8 @@ impl ResultPanel {
             return;
         };
         let sorted = self.sorted_rows(rows);
-        let Some(row) = sorted.get(row_idx) else {
+        let filtered = self.filtered_rows(&sorted);
+        let Some(row) = filtered.get(row_idx) else {
             return;
         };
 
@@ -624,7 +640,8 @@ impl ResultPanel {
             return;
         };
         let sorted = self.sorted_rows(rows);
-        let Some(row) = sorted.get(row_idx) else {
+        let filtered = self.filtered_rows(&sorted);
+        let Some(row) = filtered.get(row_idx) else {
             return;
         };
 
@@ -675,12 +692,8 @@ impl ResultPanel {
         cx.notify();
     }
 
-    /// Export current result set as CSV to clipboard.
-    fn export_csv(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
-            return;
-        };
-
+    /// Build CSV content from columns and rows.
+    fn build_csv(columns: &[ColumnMeta], rows: &[Vec<CellValue>]) -> String {
         let mut csv = String::new();
 
         // Header row
@@ -705,15 +718,11 @@ impl ResultPanel {
             csv.push('\n');
         }
 
-        cx.write_to_clipboard(ClipboardItem::new_string(csv));
+        csv
     }
 
-    /// Export current result set as JSON to clipboard.
-    fn export_json(&self, cx: &mut Context<Self>) {
-        let ResultState::Success { columns, rows, .. } = self.active_state() else {
-            return;
-        };
-
+    /// Build JSON content from columns and rows.
+    fn build_json(columns: &[ColumnMeta], rows: &[Vec<CellValue>]) -> String {
         let json_rows: Vec<serde_json::Value> = rows
             .iter()
             .map(|row| {
@@ -733,8 +742,73 @@ impl ResultPanel {
             })
             .collect();
 
-        let json = serde_json::to_string_pretty(&json_rows).unwrap_or_default();
+        serde_json::to_string_pretty(&json_rows).unwrap_or_default()
+    }
+
+    /// Export current result set as CSV to clipboard.
+    fn export_csv(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+            return;
+        };
+        let csv = Self::build_csv(columns, rows);
+        cx.write_to_clipboard(ClipboardItem::new_string(csv));
+    }
+
+    /// Export current result set as JSON to clipboard.
+    fn export_json(&self, cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+            return;
+        };
+        let json = Self::build_json(columns, rows);
         cx.write_to_clipboard(ClipboardItem::new_string(json));
+    }
+
+    /// Export current result set as CSV to a file in ~/Downloads.
+    fn export_csv_to_file(&self, _cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+            return;
+        };
+        let csv = Self::build_csv(columns, rows);
+        let filename = format!(
+            "pgblade_export_{}.csv",
+            chrono::Utc::now().format("%Y%m%d_%H%M%S")
+        );
+        let path = dirs::download_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
+            .join(&filename);
+
+        match std::fs::write(&path, csv) {
+            Ok(_) => {
+                tracing::info!("Exported CSV to {}", path.display());
+            }
+            Err(e) => {
+                tracing::error!("CSV export failed: {e}");
+            }
+        }
+    }
+
+    /// Export current result set as JSON to a file in ~/Downloads.
+    fn export_json_to_file(&self, _cx: &mut Context<Self>) {
+        let ResultState::Success { columns, rows, .. } = self.active_state() else {
+            return;
+        };
+        let json = Self::build_json(columns, rows);
+        let filename = format!(
+            "pgblade_export_{}.json",
+            chrono::Utc::now().format("%Y%m%d_%H%M%S")
+        );
+        let path = dirs::download_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
+            .join(&filename);
+
+        match std::fs::write(&path, json) {
+            Ok(_) => {
+                tracing::info!("Exported JSON to {}", path.display());
+            }
+            Err(e) => {
+                tracing::error!("JSON export failed: {e}");
+            }
+        }
     }
 
     /// Export current result set as INSERT statements to clipboard.
@@ -869,6 +943,21 @@ impl ResultPanel {
         sorted
     }
 
+    /// Filter rows by the current filter text (case-insensitive substring match on any column).
+    fn filtered_rows(&self, rows: &[Vec<CellValue>]) -> Vec<Vec<CellValue>> {
+        if self.filter_text.is_empty() {
+            return rows.to_vec();
+        }
+        let filter_lower = self.filter_text.to_lowercase();
+        rows.iter()
+            .filter(|row| {
+                row.iter()
+                    .any(|cell| cell.display().to_lowercase().contains(&filter_lower))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Copy all visible results as tab-separated values to the clipboard.
     fn copy_results_tsv(&self, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
@@ -879,6 +968,7 @@ impl ResultPanel {
         };
 
         let sorted = self.sorted_rows(rows);
+        let filtered = self.filtered_rows(&sorted);
 
         let mut tsv = String::new();
         // Header
@@ -891,7 +981,7 @@ impl ResultPanel {
         );
         tsv.push('\n');
         // Rows
-        for row in &sorted {
+        for row in &filtered {
             tsv.push_str(
                 &row.iter()
                     .map(|c| c.display())
@@ -1119,7 +1209,7 @@ impl ResultPanel {
     }
 
     fn render_ddl(&self, ddl: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let ddl_text = ddl.to_string();
+        let _ddl_text = ddl.to_string();
         v_flex()
             .size_full()
             .overflow_hidden()
@@ -1172,7 +1262,7 @@ impl ResultPanel {
                             .font_family("monospace")
                             .text_color(cx.theme().colors().text)
                             .whitespace_nowrap()
-                            .child(ddl_text),
+                            .child(ddl.to_string()),
                     ),
             )
     }
@@ -1235,6 +1325,51 @@ impl ResultPanel {
             )
     }
 
+    /// Render the filter bar shown above the table when filter is active.
+    fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h(px(24.))
+            .px_2()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().surface_background)
+            .child(
+                Icon::new(IconName::MagnifyingGlass)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(if self.filter_text.is_empty() {
+                        cx.theme().colors().text_disabled
+                    } else {
+                        cx.theme().colors().text
+                    })
+                    .child(if self.filter_text.is_empty() {
+                        "Type to filter rows...".to_string()
+                    } else {
+                        self.filter_text.clone()
+                    }),
+            )
+            .when(!self.filter_text.is_empty(), |el| {
+                el.child(
+                    IconButton::new("clear-filter", IconName::XCircle)
+                        .icon_size(IconSize::XSmall)
+                        .icon_color(Color::Muted)
+                        .style(ButtonStyle::Subtle)
+                        .tooltip(Tooltip::text("Clear filter (Escape)"))
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.filter_text.clear();
+                            cx.notify();
+                        })),
+                )
+            })
+    }
+
     fn render_results(
         &self,
         columns: &[ColumnMeta],
@@ -1242,85 +1377,15 @@ impl ResultPanel {
         duration_ms: u128,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let columns_clone = columns.to_vec();
-        let sorted = self.sorted_rows(rows);
-        let row_count = rows.len();
-        let selected_row = self.selected_row;
+        let col_count = columns.len() + 1; // +1 for row number column
 
-        // Extract theme colors upfront so the closure captures owned Hsla values
-        let surface_bg = cx.theme().colors().surface_background;
-        let element_active = cx.theme().colors().element_active;
-        let text_disabled = cx.theme().colors().text_disabled;
-        let text_color = cx.theme().colors().text;
-        let selection_bg = cx.theme().colors().element_selected;
-
-        // Capture a weak entity for click handling inside uniform_list closure
-        let this = cx.entity().downgrade();
-
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            // Header row
-            .child(self.render_column_headers(columns, cx))
-            // Data rows (uniform_list handles its own scrolling)
-            .child(
-                uniform_list("result-rows", row_count, move |range, _window, _cx| {
-                    sorted[range.clone()]
-                        .iter()
-                        .enumerate()
-                        .map(|(local_idx, row)| {
-                            let idx = range.start + local_idx;
-                            let this = this.clone();
-                            Self::render_data_row_static(
-                                idx,
-                                row,
-                                &columns_clone,
-                                selected_row,
-                                surface_bg,
-                                element_active,
-                                selection_bg,
-                                text_disabled,
-                                text_color,
-                                Some(this),
-                            )
-                        })
-                        .collect()
-                })
-                .flex_1(),
-            )
-            // Footer
-            .child(self.render_footer(row_count, duration_ms, cx))
-    }
-
-    fn render_column_headers(
-        &self,
-        columns: &[ColumnMeta],
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut header = h_flex()
-            .h(px(26.))
-            .px_1()
-            .bg(cx.theme().colors().title_bar_background)
-            .border_b_1()
-            .border_color(cx.theme().colors().border);
-
-        let hover_bg = cx.theme().colors().element_hover;
-
-        // Row number column
-        header = header.child(
-            div()
-                .w(px(40.))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .child(
-                    Label::new("#")
-                        .size(LabelSize::XSmall)
-                        .color(Color::Disabled),
-                ),
-        );
+        // Build header cells
+        let mut header_cells: Vec<AnyElement> = vec![
+            Label::new("#")
+                .size(LabelSize::XSmall)
+                .color(Color::Disabled)
+                .into_any_element(),
+        ];
 
         let active_sort_column = self.tabs[self.active_tab].sort_column;
         let active_sort_ascending = self.tabs[self.active_tab].sort_ascending;
@@ -1334,18 +1399,10 @@ impl ResultPanel {
                 ""
             };
 
-            header = header.child(
+            header_cells.push(
                 div()
-                    .id(SharedString::from(format!("col-header-{i}")))
-                    .min_w(px(100.))
-                    .max_w(px(200.))
-                    .flex_1()
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
+                    .id(SharedString::from(format!("col-h-{i}")))
                     .cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         let tab = &mut this.tabs[this.active_tab];
                         if tab.sort_column == Some(col_idx) {
@@ -1359,118 +1416,127 @@ impl ResultPanel {
                     .child(
                         Label::new(format!("{}{sort_indicator}", col.name))
                             .size(LabelSize::XSmall)
-                            .weight(FontWeight::SEMIBOLD)
-                            .truncate(),
-                    ),
+                            .weight(FontWeight::SEMIBOLD),
+                    )
+                    .into_any_element(),
             );
         }
 
-        header
-    }
+        // Sort and filter rows
+        let sorted = self.sorted_rows(rows);
+        let filtered = self.filtered_rows(&sorted);
+        let row_count = filtered.len();
+        let total_row_count = rows.len();
+        let selected_row = self.selected_row;
+        let this = cx.entity().downgrade();
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_data_row_static(
-        idx: usize,
-        row: &[CellValue],
-        _columns: &[ColumnMeta],
-        selected_row: Option<usize>,
-        surface_bg: Hsla,
-        element_active: Hsla,
-        selection_bg: Hsla,
-        text_disabled: Hsla,
-        text_color: Hsla,
-        weak_entity: Option<WeakEntity<ResultPanel>>,
-    ) -> Stateful<Div> {
-        let is_selected = selected_row == Some(idx);
-        let bg = if is_selected {
-            selection_bg
-        } else if idx.is_multiple_of(2) {
-            surface_bg
-        } else {
-            // Odd rows get no explicit bg (transparent)
-            Hsla::default()
-        };
+        let selection_bg = cx.theme().colors().element_selected;
 
-        let mut row_div = div()
-            .id(ElementId::Name(SharedString::from(format!("row-{idx}"))))
-            .flex()
-            .flex_row()
-            .h(px(22.))
-            .px_1()
-            .cursor_pointer()
-            .when(is_selected, |s| s.bg(bg))
-            .when(!is_selected && idx.is_multiple_of(2), |s| s.bg(surface_bg))
-            .hover(|s| s.bg(element_active));
+        let table = Table::new(col_count)
+            .header(header_cells)
+            .striped()
+            .uniform_list("result-data", row_count, {
+                let columns = columns.to_vec();
+                let filtered = filtered.clone();
+                move |range, _window, _cx| {
+                    filtered[range.clone()]
+                        .iter()
+                        .enumerate()
+                        .map(|(local_idx, row)| {
+                            let _idx = range.start + local_idx;
+                            let mut cells: Vec<AnyElement> = vec![
+                                Label::new((range.start + local_idx + 1).to_string())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Disabled)
+                                    .into_any_element(),
+                            ];
 
-        // Add click handler if we have a weak entity reference
-        if let Some(this) = weak_entity {
-            row_div = row_div.on_click(move |_event, _window, cx| {
-                this.update(cx, |panel, cx| {
-                    panel.select_row(idx, cx);
-                })
-                .ok();
+                            for (col_i, cell) in row.iter().enumerate() {
+                                let (text, color) = match cell {
+                                    CellValue::Null => ("NULL".to_string(), Color::Disabled),
+                                    _ => {
+                                        let display = cell.display();
+                                        let col_type = columns
+                                            .get(col_i)
+                                            .map(|c| c.type_name.as_str())
+                                            .unwrap_or("");
+                                        let color = match col_type {
+                                            "int4" | "int8" | "float4" | "float8" | "numeric" => {
+                                                Color::Accent
+                                            }
+                                            "bool" => Color::Warning,
+                                            _ => Color::Default,
+                                        };
+                                        (display, color)
+                                    }
+                                };
+                                cells.push(
+                                    Label::new(text)
+                                        .size(LabelSize::XSmall)
+                                        .color(color)
+                                        .into_any_element(),
+                                );
+                            }
+                            cells
+                        })
+                        .collect()
+                }
+            })
+            .interactable(&self.table_interaction)
+            .map_row({
+                let this = this.clone();
+                move |(idx, row_div), _window, _cx| {
+                    let this = this.clone();
+                    let is_selected = selected_row == Some(idx);
+                    row_div
+                        .when(is_selected, |d| d.bg(selection_bg))
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |panel, cx| {
+                                panel.select_row(idx, cx);
+                            })
+                            .ok();
+                        })
+                        .into_any_element()
+                }
             });
-        }
 
-        // Row number
-        row_div = row_div.child(
-            div()
-                .w(px(40.))
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(text_disabled)
-                .flex()
-                .items_center()
-                .child(format!("{}", idx + 1)),
-        );
-
-        for cell in row.iter() {
-            let display = cell.display();
-            let is_null = cell.is_null();
-
-            row_div = row_div.child(
-                div()
-                    .min_w(px(100.))
-                    .max_w(px(200.))
-                    .flex_1()
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .text_xs()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .when(is_null, |s| s.text_color(text_disabled))
-                            .when(!is_null, |s| s.text_color(text_color))
-                            .child(display),
-                    ),
-            );
-        }
-
-        row_div
+        v_flex()
+            .size_full()
+            .child(self.render_filter_bar(cx))
+            .child(table)
+            .child(self.render_footer(total_row_count, row_count, duration_ms, cx))
     }
 
     fn render_footer(
         &self,
-        row_count: usize,
+        total_row_count: usize,
+        visible_row_count: usize,
         duration_ms: u128,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let row_word = if row_count == 1 { "row" } else { "rows" };
+        let row_word = if total_row_count == 1 { "row" } else { "rows" };
         let has_selected = self.selected_row.is_some();
         let has_more = self
             .tabs
             .get(self.active_tab)
             .map(|t| t.has_more)
             .unwrap_or(false);
+        let is_filtered = !self.filter_text.is_empty();
 
         // Left: row count + timing (indicate truncation when has_more)
-        let left_info = if has_more {
-            format!("{row_count}+ rows (limited) in {duration_ms}ms")
+        let left_info = if has_more && is_filtered {
+            format!(
+                "{visible_row_count}/{total_row_count}+ rows (filtered, limited) in {duration_ms}ms"
+            )
+        } else if has_more {
+            format!("{total_row_count}+ rows (limited) in {duration_ms}ms")
+        } else if is_filtered {
+            format!(
+                "{visible_row_count}/{total_row_count} {row_word} (filtered) in {duration_ms}ms"
+            )
         } else {
-            format!("{row_count} {row_word} in {duration_ms}ms")
+            format!("{total_row_count} {row_word} in {duration_ms}ms")
         };
         // Center: tab indicator
         let center_info = format!("Tab {} / {}", self.active_tab + 1, self.tabs.len());
@@ -1590,6 +1656,20 @@ impl ResultPanel {
                     .on_click(cx.listener(|this, _, _window, cx| this.export_json(cx))),
             )
             .child(
+                Button::new("save-csv", "Save CSV")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Save CSV to ~/Downloads"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.export_csv_to_file(cx))),
+            )
+            .child(
+                Button::new("save-json", "Save JSON")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::XSmall)
+                    .tooltip(Tooltip::text("Save JSON to ~/Downloads"))
+                    .on_click(cx.listener(|this, _, _window, cx| this.export_json_to_file(cx))),
+            )
+            .child(
                 Button::new("export-insert", "INS")
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::XSmall)
@@ -1634,8 +1714,31 @@ impl Render for ResultPanel {
             .flex_col()
             .overflow_hidden()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                // Cmd+C: copy TSV
                 if event.keystroke.key == "c" && event.keystroke.modifiers.platform {
                     this.copy_results_tsv(cx);
+                    return;
+                }
+                // Escape: clear filter
+                if event.keystroke.key == "escape" {
+                    this.filter_text.clear();
+                    cx.notify();
+                    return;
+                }
+                // Backspace: remove last char from filter
+                if event.keystroke.key == "backspace" {
+                    this.filter_text.pop();
+                    this.selected_row = None;
+                    cx.notify();
+                    return;
+                }
+                // Typing characters adds to filter
+                if let Some(ref ch) = event.keystroke.key_char {
+                    if !event.keystroke.modifiers.platform && !event.keystroke.modifiers.control {
+                        this.filter_text.push_str(ch);
+                        this.selected_row = None;
+                        cx.notify();
+                    }
                 }
             }));
 
