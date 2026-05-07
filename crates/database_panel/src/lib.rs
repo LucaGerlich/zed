@@ -1,4 +1,5 @@
 mod connection_panel;
+mod database_status;
 mod result_panel;
 mod sql_completion;
 pub mod sql_completion_provider;
@@ -12,6 +13,7 @@ use picker::Picker;
 use workspace::Workspace;
 
 pub use connection_panel::ConnectionPanel;
+pub use database_status::DatabaseStatusItem;
 pub use result_panel::ResultPanel;
 pub use sql_completion_provider::SqlCompletionProvider;
 
