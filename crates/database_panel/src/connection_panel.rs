@@ -771,6 +771,11 @@ impl ConnectionPanel {
         cx.notify();
     }
 
+    /// Returns the currently connected profile, if any.
+    pub fn connected_profile(&self) -> Option<&ConnectionProfile> {
+        self.connected_profile.as_ref()
+    }
+
     /// Returns the environment of the currently connected profile, if any.
     pub fn connection_environment(&self) -> Option<Environment> {
         self.connected_profile.as_ref().map(|p| p.environment)

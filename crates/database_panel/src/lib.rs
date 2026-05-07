@@ -101,7 +101,24 @@ actions!(
         DetectMigrations,
         GenerateMigration,
         AnalyzePerformance,
-        GenerateDataProfile
+        GenerateDataProfile,
+        CreateRole,
+        AlterRole,
+        RoleMemberships,
+        RolePermissions,
+        CreateDatabase,
+        DatabaseActivity,
+        CreateSchema,
+        ObjectOwnership,
+        TransferOwnership,
+        RlsTemplate,
+        ViewPolicies,
+        SecurityAudit,
+        GeneratePgDump,
+        TableMaintenance,
+        ConnectionAge,
+        CheckpointStats,
+        IoStats
     ]
 );
 
@@ -507,6 +524,75 @@ pub fn init(cx: &mut App) {
             // Register the GenerateDataProfile action on the workspace
             workspace.register_action(|workspace, _: &GenerateDataProfile, window, cx| {
                 generate_data_profile_action(workspace, window, cx);
+            });
+
+            // Register server administration actions
+            workspace.register_action(|workspace, _: &CreateRole, window, cx| {
+                create_role_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &AlterRole, window, cx| {
+                alter_role_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &RoleMemberships, window, cx| {
+                role_memberships_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &RolePermissions, window, cx| {
+                role_permissions_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &CreateDatabase, window, cx| {
+                create_database_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &DatabaseActivity, window, cx| {
+                database_activity_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &CreateSchema, window, cx| {
+                create_schema_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ObjectOwnership, window, cx| {
+                object_ownership_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &TransferOwnership, window, cx| {
+                transfer_ownership_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &RlsTemplate, window, cx| {
+                rls_template_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ViewPolicies, window, cx| {
+                view_policies_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &SecurityAudit, window, cx| {
+                security_audit_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &GeneratePgDump, window, cx| {
+                generate_pgdump_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &TableMaintenance, window, cx| {
+                table_maintenance_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &ConnectionAge, window, cx| {
+                connection_age_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &CheckpointStats, window, cx| {
+                checkpoint_stats_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &IoStats, window, cx| {
+                io_stats_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -1830,7 +1916,15 @@ All actions are available in the command palette:
   Stat Statements, Table Access Stats, Active Queries,
   Connection Limits, Maintenance Recommendations,
   Duplicate Indexes, Show Shortcuts, Lint SQL, Compare Explain,
-  Explain Query AI";
+  Explain Query AI,
+
+Server Administration:
+  Create Role, Alter Role (select role name), Role Memberships,
+  Role Permissions (select role name), Create Database,
+  Database Activity, Create Schema, Object Ownership,
+  Transfer Ownership (select role name), RLS Template (select table),
+  View Policies, Security Audit, Generate pg_dump,
+  Table Maintenance, Connection Age, Checkpoint Stats, IO Stats";
 
     workspace.open_panel::<ResultPanel>(window, cx);
     if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
@@ -3497,4 +3591,447 @@ fn generate_data_profile_action(
     ));
 
     insert_into_editor(workspace, &sql, window, cx);
+}
+
+// ---------------------------------------------------------------------------
+// Server Administration Actions
+// ---------------------------------------------------------------------------
+
+/// Insert a CREATE ROLE template into the active editor.
+fn create_role_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "-- Create a new role\n\
+        CREATE ROLE role_name WITH\n\
+        \tLOGIN\n\
+        \tPASSWORD 'secure_password'\n\
+        \tCONNECTION LIMIT 10\n\
+        \tVALID UNTIL '2027-01-01'\n\
+        \tIN ROLE parent_role;\n\n\
+        -- Common role options:\n\
+        -- SUPERUSER | NOSUPERUSER\n\
+        -- CREATEDB | NOCREATEDB\n\
+        -- CREATEROLE | NOCREATEROLE\n\
+        -- INHERIT | NOINHERIT\n\
+        -- REPLICATION | NOREPLICATION\n\
+        -- BYPASSRLS | NOBYPASSRLS";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Insert an ALTER ROLE template for the selected role name.
+fn alter_role_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let role = selected.trim();
+
+    let sql = format!(
+        "-- Alter role {role}\n\
+         ALTER ROLE {role} WITH PASSWORD 'new_password';\n\
+         ALTER ROLE {role} WITH CONNECTION LIMIT 20;\n\
+         ALTER ROLE {role} WITH VALID UNTIL '2027-12-31';\n\n\
+         -- Grant/revoke capabilities\n\
+         ALTER ROLE {role} CREATEDB;\n\
+         ALTER ROLE {role} NOCREATEDB;\n\
+         ALTER ROLE {role} CREATEROLE;\n\
+         ALTER ROLE {role} NOCREATEROLE;\n\n\
+         -- Rename\n\
+         ALTER ROLE {role} RENAME TO new_name;\n\n\
+         -- Drop (must reassign owned objects first)\n\
+         -- REASSIGN OWNED BY {role} TO postgres;\n\
+         -- DROP OWNED BY {role};\n\
+         -- DROP ROLE {role};"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Show role memberships across all non-system roles.
+fn role_memberships_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        r.rolname AS role, \
+        m.rolname AS member_of, \
+        g.rolname AS granted_by, \
+        am.admin_option \
+    FROM pg_auth_members am \
+    JOIN pg_roles r ON r.oid = am.member \
+    JOIN pg_roles m ON m.oid = am.roleid \
+    LEFT JOIN pg_roles g ON g.oid = am.grantor \
+    WHERE r.rolname NOT LIKE 'pg_%' \
+    ORDER BY r.rolname, m.rolname";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show permissions for the selected role on all objects.
+fn role_permissions_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let role = selected.trim().replace('\'', "''");
+
+    let sql = format!(
+        "SELECT \
+            table_schema AS schema, \
+            table_name AS object, \
+            string_agg(privilege_type, ', ' ORDER BY privilege_type) AS privileges \
+        FROM information_schema.table_privileges \
+        WHERE grantee = '{role}' \
+        GROUP BY table_schema, table_name \
+        ORDER BY table_schema, table_name"
+    );
+    execute_system_query(workspace, &sql, window, cx);
+}
+
+/// Insert a CREATE DATABASE template into the active editor.
+fn create_database_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "-- Create a new database\n\
+        CREATE DATABASE new_database\n\
+        \tWITH\n\
+        \tOWNER = postgres\n\
+        \tENCODING = 'UTF8'\n\
+        \tLC_COLLATE = 'en_US.UTF-8'\n\
+        \tLC_CTYPE = 'en_US.UTF-8'\n\
+        \tTEMPLATE = template0\n\
+        \tCONNECTION LIMIT = -1;\n\n\
+        -- Add comment\n\
+        COMMENT ON DATABASE new_database IS 'Description here';";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Show database activity summary from pg_stat_database.
+fn database_activity_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        datname AS database, \
+        numbackends AS connections, \
+        xact_commit AS commits, \
+        xact_rollback AS rollbacks, \
+        blks_read AS disk_reads, \
+        blks_hit AS cache_hits, \
+        CASE WHEN blks_read + blks_hit > 0 \
+            THEN round(100.0 * blks_hit / (blks_read + blks_hit), 2) \
+            ELSE 0 END AS cache_hit_pct, \
+        tup_returned AS rows_returned, \
+        tup_fetched AS rows_fetched, \
+        tup_inserted AS rows_inserted, \
+        tup_updated AS rows_updated, \
+        tup_deleted AS rows_deleted, \
+        conflicts, \
+        deadlocks, \
+        temp_files, \
+        pg_size_pretty(temp_bytes) AS temp_bytes, \
+        stats_reset \
+    FROM pg_stat_database \
+    WHERE datname NOT LIKE 'template%' \
+    ORDER BY numbackends DESC";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Insert a CREATE SCHEMA template into the active editor.
+fn create_schema_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "-- Create a new schema\n\
+        CREATE SCHEMA IF NOT EXISTS schema_name\n\
+        \tAUTHORIZATION owner_role;\n\n\
+        -- Set default privileges for the schema\n\
+        ALTER DEFAULT PRIVILEGES IN SCHEMA schema_name\n\
+        \tGRANT SELECT ON TABLES TO read_role;\n\
+        ALTER DEFAULT PRIVILEGES IN SCHEMA schema_name\n\
+        \tGRANT INSERT, UPDATE, DELETE ON TABLES TO write_role;\n\
+        ALTER DEFAULT PRIVILEGES IN SCHEMA schema_name\n\
+        \tGRANT USAGE ON SEQUENCES TO write_role;\n\n\
+        -- Grant usage on the schema\n\
+        GRANT USAGE ON SCHEMA schema_name TO read_role;\n\
+        GRANT ALL ON SCHEMA schema_name TO write_role;";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Show ownership of all user objects (tables, views, sequences).
+fn object_ownership_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        n.nspname AS schema, \
+        c.relname AS object_name, \
+        CASE c.relkind \
+            WHEN 'r' THEN 'table' \
+            WHEN 'v' THEN 'view' \
+            WHEN 'm' THEN 'materialized view' \
+            WHEN 'S' THEN 'sequence' \
+            WHEN 'i' THEN 'index' \
+        END AS type, \
+        pg_catalog.pg_get_userbyid(c.relowner) AS owner \
+    FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
+        AND c.relkind IN ('r', 'v', 'm', 'S') \
+    ORDER BY n.nspname, c.relkind, c.relname";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Insert a REASSIGN OWNED / transfer ownership template for the selected role.
+fn transfer_ownership_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let role = selected.trim();
+
+    let sql = format!(
+        "-- Transfer all objects owned by {role}\n\n\
+         -- Reassign all objects to a new owner\n\
+         REASSIGN OWNED BY {role} TO new_owner;\n\n\
+         -- Or transfer specific objects:\n\
+         -- ALTER TABLE table_name OWNER TO new_owner;\n\
+         -- ALTER VIEW view_name OWNER TO new_owner;\n\
+         -- ALTER SEQUENCE seq_name OWNER TO new_owner;\n\
+         -- ALTER FUNCTION func_name() OWNER TO new_owner;\n\
+         -- ALTER SCHEMA schema_name OWNER TO new_owner;\n\
+         -- ALTER DATABASE db_name OWNER TO new_owner;"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Insert a Row Level Security template for the selected table.
+fn rls_template_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table = selected.trim();
+
+    let sql = format!(
+        "-- Row Level Security for {table}\n\n\
+         -- Enable RLS\n\
+         ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;\n\n\
+         -- Policy: users can only see their own rows\n\
+         CREATE POLICY user_isolation ON {table}\n\
+         \tFOR ALL\n\
+         \tUSING (user_id = current_user_id())\n\
+         \tWITH CHECK (user_id = current_user_id());\n\n\
+         -- Policy: read-only for specific role\n\
+         CREATE POLICY readonly_access ON {table}\n\
+         \tFOR SELECT\n\
+         \tTO readonly_role\n\
+         \tUSING (true);\n\n\
+         -- View policies\n\
+         SELECT * FROM pg_policies WHERE tablename = '{table}';\n\n\
+         -- Disable RLS\n\
+         -- ALTER TABLE {table} DISABLE ROW LEVEL SECURITY;"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Show all Row Level Security policies.
+fn view_policies_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        schemaname AS schema, \
+        tablename AS table_name, \
+        policyname AS policy, \
+        permissive, \
+        roles, \
+        cmd AS operation, \
+        LEFT(qual::text, 100) AS using_expr, \
+        LEFT(with_check::text, 100) AS check_expr \
+    FROM pg_policies \
+    ORDER BY schemaname, tablename, policyname";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show security-related PostgreSQL settings.
+fn security_audit_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT name, setting, short_desc \
+    FROM pg_settings \
+    WHERE name IN ( \
+        'ssl', 'ssl_cert_file', 'ssl_key_file', \
+        'password_encryption', 'log_connections', 'log_disconnections', \
+        'log_statement', 'log_min_duration_statement', \
+        'row_security', 'track_activities', 'track_counts', \
+        'pg_stat_statements.track', 'shared_preload_libraries', \
+        'authentication_timeout', 'idle_in_transaction_session_timeout', \
+        'statement_timeout', 'lock_timeout' \
+    ) ORDER BY name";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Generate pg_dump / pg_restore commands using the current connection profile.
+fn generate_pgdump_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(profile) = conn_panel.read(cx).connected_profile() else {
+        insert_into_editor(workspace, "-- Connect to a database first", window, cx);
+        return;
+    };
+    let host = &profile.host;
+    let port = profile.port;
+    let username = &profile.username;
+    let database = &profile.database;
+
+    let sql = format!(
+        "-- pg_dump commands for {database}\n\n\
+         -- Full database dump (custom format, best for restore)\n\
+         pg_dump -h {host} -p {port} -U {username} -Fc -f {database}_$(date +%Y%m%d).dump {database}\n\n\
+         -- Schema only (no data)\n\
+         pg_dump -h {host} -p {port} -U {username} --schema-only -f {database}_schema.sql {database}\n\n\
+         -- Data only\n\
+         pg_dump -h {host} -p {port} -U {username} --data-only -f {database}_data.sql {database}\n\n\
+         -- Specific tables\n\
+         pg_dump -h {host} -p {port} -U {username} -t table1 -t table2 -f tables.sql {database}\n\n\
+         -- Restore from custom format\n\
+         pg_restore -h {host} -p {port} -U {username} -d {database} -Fc {database}_dump.dump\n\n\
+         -- Plain SQL restore\n\
+         psql -h {host} -p {port} -U {username} -d {database} -f dump.sql"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Show per-table maintenance statistics (vacuum, analyze, bloat).
+fn table_maintenance_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        schemaname || '.' || relname AS table_name, \
+        n_live_tup AS live_rows, \
+        n_dead_tup AS dead_rows, \
+        CASE WHEN n_live_tup > 0 \
+            THEN round(100.0 * n_dead_tup / n_live_tup, 1) ELSE 0 END AS bloat_pct, \
+        last_vacuum::timestamp(0) AS last_vacuum, \
+        last_autovacuum::timestamp(0) AS last_autovacuum, \
+        last_analyze::timestamp(0) AS last_analyze, \
+        vacuum_count, \
+        autovacuum_count, \
+        analyze_count, \
+        autoanalyze_count \
+    FROM pg_stat_user_tables \
+    ORDER BY n_dead_tup DESC \
+    LIMIT 30";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show connection age and long-lived connections.
+fn connection_age_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        pid, \
+        usename AS user_name, \
+        datname AS database, \
+        application_name AS app, \
+        client_addr AS client, \
+        now() - backend_start AS connection_age, \
+        state, \
+        CASE WHEN state = 'active' THEN now() - query_start END AS query_duration \
+    FROM pg_stat_activity \
+    WHERE datname IS NOT NULL \
+    ORDER BY backend_start \
+    LIMIT 30";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show checkpoint and background writer statistics.
+fn checkpoint_stats_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT \
+        checkpoints_timed, \
+        checkpoints_req, \
+        checkpoint_write_time / 1000 AS write_time_sec, \
+        checkpoint_sync_time / 1000 AS sync_time_sec, \
+        buffers_checkpoint, \
+        buffers_clean, \
+        buffers_backend, \
+        maxwritten_clean, \
+        buffers_alloc, \
+        stats_reset \
+    FROM pg_stat_bgwriter";
+    execute_system_query(workspace, sql, window, cx);
+}
+
+/// Show per-table I/O statistics (heap and index cache hit ratios).
+fn io_stats_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "SELECT \
+        schemaname || '.' || relname AS table_name, \
+        heap_blks_read AS heap_disk_reads, \
+        heap_blks_hit AS heap_cache_hits, \
+        CASE WHEN heap_blks_read + heap_blks_hit > 0 \
+            THEN round(100.0 * heap_blks_hit / (heap_blks_read + heap_blks_hit), 1) \
+            ELSE 0 END AS heap_cache_pct, \
+        idx_blks_read AS idx_disk_reads, \
+        idx_blks_hit AS idx_cache_hits, \
+        CASE WHEN idx_blks_read + idx_blks_hit > 0 \
+            THEN round(100.0 * idx_blks_hit / (idx_blks_read + idx_blks_hit), 1) \
+            ELSE 0 END AS idx_cache_pct, \
+        toast_blks_read AS toast_disk, \
+        toast_blks_hit AS toast_cache \
+    FROM pg_statio_user_tables \
+    WHERE heap_blks_read + heap_blks_hit > 0 \
+    ORDER BY heap_blks_read DESC \
+    LIMIT 20";
+    execute_system_query(workspace, sql, window, cx);
 }
