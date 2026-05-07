@@ -661,6 +661,23 @@ impl ConnectionPanel {
         self.storage.load_recent_history(100).unwrap_or_default()
     }
 
+    /// Save the current SQL as a bookmark using the first line (up to 50 chars) as the name.
+    pub fn save_bookmark(&self, sql: &str) {
+        let name: String = sql
+            .lines()
+            .next()
+            .unwrap_or("Query")
+            .chars()
+            .take(50)
+            .collect();
+        let _ = self.storage.save_bookmark(&name, sql);
+    }
+
+    /// Load all saved bookmarks.
+    pub fn load_bookmarks(&self) -> Vec<(String, String, String, String)> {
+        self.storage.load_bookmarks().unwrap_or_default()
+    }
+
     /// Disconnect from the current database session and reset state.
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.session = None;

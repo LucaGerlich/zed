@@ -65,7 +65,18 @@ actions!(
         ActiveQueries,
         ConnectionLimits,
         MaintenanceRecommendations,
-        DuplicateIndexes
+        DuplicateIndexes,
+        SaveBookmark,
+        ViewBookmarks,
+        SnippetCte,
+        SnippetWindowFunction,
+        SnippetUpsert,
+        SnippetPivot,
+        SnippetRecursiveCte,
+        SnippetJsonQuery,
+        SnippetLateralJoin,
+        TableStructure,
+        GenerateAlterTable
     ]
 );
 
@@ -333,6 +344,55 @@ pub fn init(cx: &mut App) {
             // Register the DuplicateIndexes action on the workspace
             workspace.register_action(|workspace, _: &DuplicateIndexes, window, cx| {
                 duplicate_indexes_action(workspace, window, cx);
+            });
+
+            // Register the SaveBookmark action on the workspace
+            workspace.register_action(|workspace, _: &SaveBookmark, _window, cx| {
+                save_bookmark_action(workspace, cx);
+            });
+
+            // Register the ViewBookmarks action on the workspace
+            workspace.register_action(|workspace, _: &ViewBookmarks, window, cx| {
+                view_bookmarks_action(workspace, window, cx);
+            });
+
+            // Register SQL snippet actions on the workspace
+            workspace.register_action(|workspace, _: &SnippetCte, window, cx| {
+                snippet_cte_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &SnippetWindowFunction, window, cx| {
+                snippet_window_function_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &SnippetUpsert, window, cx| {
+                snippet_upsert_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &SnippetPivot, window, cx| {
+                snippet_pivot_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &SnippetRecursiveCte, window, cx| {
+                snippet_recursive_cte_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &SnippetJsonQuery, window, cx| {
+                snippet_json_query_action(workspace, window, cx);
+            });
+
+            workspace.register_action(|workspace, _: &SnippetLateralJoin, window, cx| {
+                snippet_lateral_join_action(workspace, window, cx);
+            });
+
+            // Register the TableStructure action on the workspace
+            workspace.register_action(|workspace, _: &TableStructure, window, cx| {
+                table_structure_action(workspace, window, cx);
+            });
+
+            // Register the GenerateAlterTable action on the workspace
+            workspace.register_action(|workspace, _: &GenerateAlterTable, window, cx| {
+                generate_alter_table_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -1781,4 +1841,241 @@ fn create_trigger_action(
             editor.insert(&format!("{prefix}{template}"), window, cx);
         });
     }
+}
+
+/// Save the current editor SQL as a bookmark.
+fn save_bookmark_action(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(sql) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    conn_panel.update(cx, |panel, _cx| {
+        panel.save_bookmark(&sql);
+        tracing::info!("Bookmark saved");
+    });
+}
+
+/// Display all saved bookmarks in the result panel.
+fn view_bookmarks_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let bookmarks = conn_panel.read(cx).load_bookmarks();
+
+    let columns = vec![
+        pgblade_core::result::ColumnMeta {
+            name: "Name".to_string(),
+            type_name: "text".to_string(),
+            nullable: false,
+        },
+        pgblade_core::result::ColumnMeta {
+            name: "SQL".to_string(),
+            type_name: "text".to_string(),
+            nullable: false,
+        },
+        pgblade_core::result::ColumnMeta {
+            name: "Created".to_string(),
+            type_name: "text".to_string(),
+            nullable: false,
+        },
+    ];
+    let rows: Vec<Vec<pgblade_core::result::CellValue>> = bookmarks
+        .iter()
+        .map(|(_id, name, sql, created)| {
+            vec![
+                pgblade_core::result::CellValue::Text(name.clone()),
+                pgblade_core::result::CellValue::Text(sql.chars().take(200).collect()),
+                pgblade_core::result::CellValue::Text(created.clone()),
+            ]
+        })
+        .collect();
+
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| {
+            panel.show_results(columns, rows, cx);
+        });
+    }
+}
+
+/// Shared helper to insert SQL text into the active editor.
+fn insert_into_editor(
+    workspace: &mut Workspace,
+    sql: &str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if let Some(active_item) = workspace.active_item(cx) {
+        if let Some(editor) = active_item.act_as::<Editor>(cx) {
+            editor.update(cx, |editor, cx| {
+                let prefix = if editor.text(cx).is_empty() {
+                    ""
+                } else {
+                    "\n\n"
+                };
+                editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+                editor.insert(&format!("{prefix}{sql}"), window, cx);
+            });
+        }
+    }
+}
+
+/// Insert a CTE snippet into the active editor.
+fn snippet_cte_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let sql = "WITH cte AS (\n    SELECT column1, column2\n    FROM table_name\n    WHERE condition\n)\nSELECT * FROM cte;";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Insert a window function snippet into the active editor.
+fn snippet_window_function_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT\n    column1,\n    ROW_NUMBER() OVER (PARTITION BY column2 ORDER BY column3 DESC) AS row_num,\n    SUM(column4) OVER (PARTITION BY column2) AS total\nFROM table_name;";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Insert an UPSERT snippet into the active editor.
+fn snippet_upsert_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "INSERT INTO table_name (column1, column2)\nVALUES ($1, $2)\nON CONFLICT (column1)\nDO UPDATE SET column2 = EXCLUDED.column2\nRETURNING *;";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Insert a pivot/FILTER snippet into the active editor.
+fn snippet_pivot_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT\n    category,\n    COUNT(*) FILTER (WHERE status = 'active') AS active,\n    COUNT(*) FILTER (WHERE status = 'inactive') AS inactive,\n    COUNT(*) AS total\nFROM table_name\nGROUP BY category\nORDER BY total DESC;";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Insert a recursive CTE snippet into the active editor.
+fn snippet_recursive_cte_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "WITH RECURSIVE tree AS (\n    -- Base case\n    SELECT id, parent_id, name, 1 AS depth\n    FROM categories\n    WHERE parent_id IS NULL\n    \n    UNION ALL\n    \n    -- Recursive case\n    SELECT c.id, c.parent_id, c.name, t.depth + 1\n    FROM categories c\n    JOIN tree t ON c.parent_id = t.id\n)\nSELECT * FROM tree ORDER BY depth, name;";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Insert a JSONB query snippet into the active editor.
+fn snippet_json_query_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT\n    id,\n    data->>'name' AS name,\n    data->'address'->>'city' AS city,\n    jsonb_array_length(data->'tags') AS tag_count\nFROM documents\nWHERE data @> '{\"type\": \"user\"}'\nORDER BY data->>'name';";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Insert a LATERAL JOIN snippet into the active editor.
+fn snippet_lateral_join_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "SELECT u.id, u.name, recent.*\nFROM users u\nCROSS JOIN LATERAL (\n    SELECT *\n    FROM orders o\n    WHERE o.user_id = u.id\n    ORDER BY o.created_at DESC\n    LIMIT 3\n) recent\nORDER BY u.name;";
+    insert_into_editor(workspace, sql, window, cx);
+}
+
+/// Show the detailed structure of a table (columns, types, constraints).
+/// Reads the table name from the selected text in the active editor.
+fn table_structure_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table_name = selected.trim().replace('\'', "''");
+
+    let sql = format!(
+        "SELECT \
+            c.column_name, \
+            c.data_type, \
+            c.character_maximum_length, \
+            c.is_nullable, \
+            c.column_default, \
+            col_description((c.table_schema || '.' || c.table_name)::regclass, c.ordinal_position) AS comment, \
+            CASE WHEN pk.column_name IS NOT NULL THEN 'YES' ELSE 'NO' END AS is_primary_key \
+        FROM information_schema.columns c \
+        LEFT JOIN ( \
+            SELECT kcu.column_name \
+            FROM information_schema.table_constraints tc \
+            JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name \
+            WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = '{table_name}' \
+        ) pk ON pk.column_name = c.column_name \
+        WHERE c.table_name = '{table_name}' \
+        ORDER BY c.ordinal_position"
+    );
+    execute_system_query(workspace, &sql, window, cx);
+}
+
+/// Generate ALTER TABLE templates for the selected table name.
+/// Reads the table name from the selected text in the active editor.
+fn generate_alter_table_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table_name = selected.trim();
+
+    let sql = format!(
+        "-- Add column\n\
+         ALTER TABLE {table_name} ADD COLUMN new_column VARCHAR(255);\n\n\
+         -- Modify column type\n\
+         ALTER TABLE {table_name} ALTER COLUMN column_name TYPE INTEGER USING column_name::integer;\n\n\
+         -- Set/drop NOT NULL\n\
+         ALTER TABLE {table_name} ALTER COLUMN column_name SET NOT NULL;\n\
+         ALTER TABLE {table_name} ALTER COLUMN column_name DROP NOT NULL;\n\n\
+         -- Set default\n\
+         ALTER TABLE {table_name} ALTER COLUMN column_name SET DEFAULT 'value';\n\n\
+         -- Drop column\n\
+         ALTER TABLE {table_name} DROP COLUMN column_name;\n\n\
+         -- Rename column\n\
+         ALTER TABLE {table_name} RENAME COLUMN old_name TO new_name;\n\n\
+         -- Add constraint\n\
+         ALTER TABLE {table_name} ADD CONSTRAINT constraint_name UNIQUE (column_name);\n\n\
+         -- Add foreign key\n\
+         ALTER TABLE {table_name} ADD CONSTRAINT fk_name FOREIGN KEY (column_name) REFERENCES other_table(id);"
+    );
+
+    insert_into_editor(workspace, &sql, window, cx);
 }

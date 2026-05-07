@@ -108,6 +108,51 @@ impl StorageManager {
             [],
         );
 
+        // Migration: bookmarks table
+        let _ = self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS bookmarks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                sql_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+        );
+
+        Ok(())
+    }
+
+    /// Save a SQL query as a named bookmark.
+    pub fn save_bookmark(&self, name: &str, sql: &str) -> Result<(), StorageError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO bookmarks (id, name, sql_text, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, name, sql, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load all bookmarks ordered by most recent first.
+    pub fn load_bookmarks(&self) -> Result<Vec<(String, String, String, String)>, StorageError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, sql_text, created_at FROM bookmarks ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    /// Delete a bookmark by its ID.
+    pub fn delete_bookmark(&self, id: &str) -> Result<(), StorageError> {
+        self.conn
+            .execute("DELETE FROM bookmarks WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
 
