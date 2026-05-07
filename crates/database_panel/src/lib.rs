@@ -97,7 +97,11 @@ actions!(
         RefreshSchema,
         LintSql,
         CompareExplain,
-        ExplainQueryAI
+        ExplainQueryAI,
+        DetectMigrations,
+        GenerateMigration,
+        AnalyzePerformance,
+        GenerateDataProfile
     ]
 );
 
@@ -483,6 +487,26 @@ pub fn init(cx: &mut App) {
             // Register the ExplainQueryAI action on the workspace
             workspace.register_action(|workspace, _: &ExplainQueryAI, window, cx| {
                 explain_query_ai_action(workspace, window, cx);
+            });
+
+            // Register the DetectMigrations action on the workspace
+            workspace.register_action(|workspace, _: &DetectMigrations, window, cx| {
+                detect_migrations_action(workspace, window, cx);
+            });
+
+            // Register the GenerateMigration action on the workspace
+            workspace.register_action(|workspace, _: &GenerateMigration, window, cx| {
+                generate_migration_action(workspace, window, cx);
+            });
+
+            // Register the AnalyzePerformance action on the workspace
+            workspace.register_action(|workspace, _: &AnalyzePerformance, window, cx| {
+                analyze_query_performance_action(workspace, window, cx);
+            });
+
+            // Register the GenerateDataProfile action on the workspace
+            workspace.register_action(|workspace, _: &GenerateDataProfile, window, cx| {
+                generate_data_profile_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -3144,4 +3168,333 @@ fn explain_query_ai_action(
             );
         });
     }
+}
+
+/// Detect migration files in the project and display them in the result panel.
+fn detect_migrations_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    // Check common migration directories
+    let migration_dirs = [
+        "migrations",
+        "db/migrations",
+        "db/migrate",
+        "prisma/migrations",
+        "alembic/versions",
+        "flyway/sql",
+        "src/migrations",
+        "database/migrations",
+    ];
+
+    let mut found_migrations = Vec::new();
+
+    for dir in &migration_dirs {
+        let path = cwd.join(dir);
+        if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                let mut files: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| {
+                        n.ends_with(".sql")
+                            || n.ends_with(".py")
+                            || n.ends_with(".rb")
+                            || n.ends_with(".ts")
+                            || n.ends_with(".js")
+                    })
+                    .collect();
+                files.sort();
+
+                for file in &files {
+                    found_migrations.push(format!("{}/{}", dir, file));
+                }
+            }
+        }
+    }
+
+    if found_migrations.is_empty() {
+        if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+            workspace.open_panel::<ResultPanel>(window, cx);
+            result_panel.update(cx, |panel, cx| {
+                panel.show_ddl(
+                    format!(
+                        "No migration files found.\n\n\
+                         Searched directories:\n{}\n\n\
+                         Project root: {}",
+                        migration_dirs
+                            .iter()
+                            .map(|d| format!("  - {d}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        cwd.display()
+                    ),
+                    cx,
+                );
+            });
+        }
+        return;
+    }
+
+    let columns = vec![pgblade_core::result::ColumnMeta {
+        name: "File".into(),
+        type_name: "text".into(),
+        nullable: false,
+    }];
+    let rows: Vec<Vec<pgblade_core::result::CellValue>> = found_migrations
+        .iter()
+        .map(|f| vec![pgblade_core::result::CellValue::Text(f.clone())])
+        .collect();
+
+    workspace.open_panel::<ResultPanel>(window, cx);
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        result_panel.update(cx, |panel, cx| panel.show_results(columns, rows, cx));
+    }
+}
+
+/// Generate a timestamped migration SQL template and insert it into the active editor.
+fn generate_migration_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
+
+    let sql = format!(
+        "-- Migration: {timestamp}_description\n\
+         -- Created: {}\n\n\
+         -- UP\n\
+         BEGIN;\n\n\
+         -- Add your migration here\n\
+         -- CREATE TABLE ...\n\
+         -- ALTER TABLE ...\n\
+         -- CREATE INDEX ...\n\n\
+         COMMIT;\n\n\
+         -- DOWN (rollback)\n\
+         -- BEGIN;\n\
+         -- DROP TABLE ...\n\
+         -- ALTER TABLE ...\n\
+         -- DROP INDEX ...\n\
+         -- COMMIT;\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
+
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Run the current query multiple times and present a performance analysis report.
+fn analyze_query_performance_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(sql) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(session) = conn_panel.read(cx).session() else {
+        return;
+    };
+    let runtime = conn_panel.read(cx).runtime();
+
+    workspace.open_panel::<ResultPanel>(window, cx);
+    let Some(result_panel) = workspace.panel::<ResultPanel>(cx) else {
+        return;
+    };
+
+    let sql_clone = sql.clone();
+
+    result_panel.update(cx, |panel, cx| {
+        panel.show_ddl(
+            "Running performance analysis (3 iterations)...".to_string(),
+            cx,
+        );
+        let tab_idx = panel.tabs.len() - 1;
+
+        cx.spawn(async move |this, cx| {
+            let mut timings = Vec::new();
+            let mut row_count = 0;
+
+            for _i in 0..3 {
+                let sql = sql_clone.clone();
+                let session = session.clone();
+                let runtime = runtime.clone();
+                let start = std::time::Instant::now();
+
+                let result = runtime
+                    .spawn(async move { session.execute(&sql).await })
+                    .await;
+
+                let elapsed = start.elapsed().as_micros();
+                timings.push(elapsed);
+
+                if let Ok(Ok(rs)) = &result {
+                    row_count = rs.rows.len();
+                }
+            }
+
+            let min = timings.iter().min().copied().unwrap_or(0);
+            let max = timings.iter().max().copied().unwrap_or(0);
+            let avg = timings.iter().sum::<u128>() / timings.len() as u128;
+            let median = {
+                let mut sorted = timings.clone();
+                sorted.sort();
+                sorted[sorted.len() / 2]
+            };
+
+            let mut report = format!(
+                "=== Query Performance Report ===\n\n\
+                 Query: {}\n\n\
+                 Iterations: 3\n\
+                 Rows returned: {}\n\n\
+                 Timing (microseconds):\n\
+                 - Min:    {} us ({:.2} ms)\n\
+                 - Max:    {} us ({:.2} ms)\n\
+                 - Avg:    {} us ({:.2} ms)\n\
+                 - Median: {} us ({:.2} ms)\n\n",
+                sql_clone.chars().take(200).collect::<String>(),
+                row_count,
+                min,
+                min as f64 / 1000.0,
+                max,
+                max as f64 / 1000.0,
+                avg,
+                avg as f64 / 1000.0,
+                median,
+                median as f64 / 1000.0,
+            );
+
+            // Recommendations
+            report.push_str("Recommendations:\n");
+            if avg > 1_000_000 {
+                report.push_str("- SLOW: Query takes >1s. Consider adding indexes or rewriting.\n");
+            } else if avg > 100_000 {
+                report.push_str(
+                    "- MODERATE: Query takes >100ms. May benefit from index optimization.\n",
+                );
+            } else if avg > 10_000 {
+                report.push_str("- ACCEPTABLE: Query takes >10ms. Good for most use cases.\n");
+            } else {
+                report.push_str("- FAST: Query takes <10ms. Excellent performance.\n");
+            }
+
+            if max > avg * 3 {
+                report.push_str(
+                    "- HIGH VARIANCE: Max is 3x+ the average. \
+                     May indicate lock contention or cache misses.\n",
+                );
+            }
+
+            if row_count > 1000 {
+                report.push_str(&format!(
+                    "- LARGE RESULT SET: {} rows. Consider adding LIMIT or pagination.\n",
+                    row_count
+                ));
+            }
+
+            this.update(cx, |panel, cx| {
+                if let Some(tab) = panel.tabs.get_mut(tab_idx) {
+                    tab.state = result_panel::ResultState::Ddl(report);
+                    tab.label = "Perf Analysis".to_string();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    });
+}
+
+/// Generate data profiling SQL for the selected table name and insert into the editor.
+fn generate_data_profile_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table = selected.trim().to_string();
+
+    // Try to get columns from schema
+    let columns = workspace.panel::<ConnectionPanel>(cx).and_then(|cp| {
+        let panel = cp.read(cx);
+        let tree = panel.schema_tree()?;
+        for schema in &tree.schemas {
+            for t in schema.tables.iter().chain(schema.views.iter()) {
+                if t.info.name == table || t.info.qualified_name() == table {
+                    return Some(t.columns.clone());
+                }
+            }
+        }
+        None
+    });
+
+    let mut sql = format!("-- Data Profile for {table}\n\n");
+    sql.push_str(&format!(
+        "-- 1. Row count\nSELECT COUNT(*) AS total_rows FROM {table};\n\n"
+    ));
+
+    if let Some(cols) = &columns {
+        // Null percentage per column
+        sql.push_str("-- 2. Null percentages\nSELECT\n");
+        let null_exprs: Vec<String> = cols
+            .iter()
+            .map(|c| {
+                format!(
+                    "    ROUND(100.0 * COUNT(*) FILTER (WHERE \"{}\" IS NULL) \
+                     / NULLIF(COUNT(*), 0), 1) AS \"{}_null_pct\"",
+                    c.name, c.name
+                )
+            })
+            .collect();
+        sql.push_str(&null_exprs.join(",\n"));
+        sql.push_str(&format!("\nFROM {table};\n\n"));
+
+        // Distinct counts
+        sql.push_str("-- 3. Distinct value counts\nSELECT\n");
+        let distinct_exprs: Vec<String> = cols
+            .iter()
+            .map(|c| {
+                format!(
+                    "    COUNT(DISTINCT \"{}\") AS \"{}_distinct\"",
+                    c.name, c.name
+                )
+            })
+            .collect();
+        sql.push_str(&distinct_exprs.join(",\n"));
+        sql.push_str(&format!("\nFROM {table};\n\n"));
+    } else {
+        sql.push_str(
+            "-- 2. Null percentages (replace with actual column names)\n\
+             -- SELECT\n\
+             --     ROUND(100.0 * COUNT(*) FILTER (WHERE col IS NULL) \
+             / NULLIF(COUNT(*), 0), 1) AS col_null_pct\n\
+             -- FROM table_name;\n\n",
+        );
+    }
+
+    sql.push_str(&format!(
+        "-- 4. Sample data\nSELECT * FROM {table} ORDER BY RANDOM() LIMIT 10;\n"
+    ));
+
+    insert_into_editor(workspace, &sql, window, cx);
 }
