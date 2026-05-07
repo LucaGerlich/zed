@@ -1961,6 +1961,159 @@ impl ConnectionPanel {
                     }
                 }
             }
+
+            // Server admin section divider and nodes
+            rows.push(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .my_1()
+                    .bg(cx.theme().colors().border)
+                    .into_any_element(),
+            );
+
+            rows.push(
+                div()
+                    .px_2()
+                    .py_1()
+                    .child(
+                        Label::new("SERVER")
+                            .size(LabelSize::XSmall)
+                            .weight(FontWeight::SEMIBOLD)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            );
+
+            let admin_items: Vec<(&str, &str, IconName, &str)> = vec![
+                (
+                    "admin:roles",
+                    "Roles & Users",
+                    IconName::Person,
+                    "SELECT rolname AS role, rolsuper AS superuser, \
+                     rolcreaterole AS can_create_role, rolcreatedb AS can_create_db, \
+                     rolcanlogin AS can_login, rolconnlimit AS conn_limit \
+                     FROM pg_roles WHERE rolname NOT LIKE 'pg_%' ORDER BY rolname",
+                ),
+                (
+                    "admin:sessions",
+                    "Active Sessions",
+                    IconName::Clock,
+                    "SELECT pid, usename AS user_name, datname AS database, state, \
+                     CASE WHEN state = 'active' THEN (now() - query_start)::text \
+                     ELSE '' END AS duration, LEFT(query, 200) AS query \
+                     FROM pg_stat_activity WHERE datname IS NOT NULL \
+                     ORDER BY state DESC, query_start",
+                ),
+                (
+                    "admin:settings",
+                    "Server Settings",
+                    IconName::ListFilter,
+                    "SELECT name, setting, unit, short_desc \
+                     FROM pg_settings WHERE source != 'default' ORDER BY name",
+                ),
+                (
+                    "admin:extensions",
+                    "Extensions",
+                    IconName::Plus,
+                    "SELECT extname AS name, extversion AS version, \
+                     n.nspname AS schema \
+                     FROM pg_extension e \
+                     JOIN pg_namespace n ON n.oid = e.extnamespace \
+                     ORDER BY extname",
+                ),
+                (
+                    "admin:tablespaces",
+                    "Tablespaces",
+                    IconName::Server,
+                    "SELECT spcname AS tablespace, \
+                     pg_size_pretty(pg_tablespace_size(spcname)) AS size, \
+                     spcowner::regrole AS owner \
+                     FROM pg_tablespace ORDER BY spcname",
+                ),
+                (
+                    "admin:locks",
+                    "Lock Monitor",
+                    IconName::LockOutlined,
+                    "SELECT blocked_locks.pid AS blocked_pid, \
+                     LEFT(blocked_activity.query, 100) AS blocked_query, \
+                     blocking_locks.pid AS blocking_pid, \
+                     LEFT(blocking_activity.query, 100) AS blocking_query \
+                     FROM pg_catalog.pg_locks blocked_locks \
+                     JOIN pg_catalog.pg_stat_activity blocked_activity \
+                         ON blocked_activity.pid = blocked_locks.pid \
+                     JOIN pg_catalog.pg_locks blocking_locks \
+                         ON blocking_locks.locktype = blocked_locks.locktype \
+                         AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database \
+                         AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation \
+                         AND blocking_locks.pid != blocked_locks.pid \
+                     JOIN pg_catalog.pg_stat_activity blocking_activity \
+                         ON blocking_activity.pid = blocking_locks.pid \
+                     WHERE NOT blocked_locks.granted",
+                ),
+                (
+                    "admin:activity",
+                    "Database Activity",
+                    IconName::DatabaseZap,
+                    "SELECT datname AS database, numbackends AS connections, \
+                     xact_commit AS commits, xact_rollback AS rollbacks, \
+                     blks_read AS disk_reads, blks_hit AS cache_hits, \
+                     CASE WHEN blks_read + blks_hit > 0 \
+                     THEN round(100.0 * blks_hit / (blks_read + blks_hit), 2) \
+                     ELSE 0 END AS cache_hit_pct, \
+                     tup_inserted + tup_updated + tup_deleted AS dml_ops \
+                     FROM pg_stat_database WHERE datname NOT LIKE 'template%' \
+                     ORDER BY numbackends DESC",
+                ),
+                (
+                    "admin:health",
+                    "Health Check",
+                    IconName::Info,
+                    "WITH db_size AS (\
+                         SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size\
+                     ), connections AS (\
+                         SELECT count(*) AS total, \
+                         count(*) FILTER (WHERE state = 'active') AS active, \
+                         count(*) FILTER (WHERE state = 'idle') AS idle \
+                         FROM pg_stat_activity WHERE datname = current_database()\
+                     ), cache AS (\
+                         SELECT CASE WHEN sum(blks_hit) + sum(blks_read) > 0 \
+                         THEN round(100.0 * sum(blks_hit) / (sum(blks_hit) + sum(blks_read)), 2) \
+                         ELSE 0 END AS hit_pct \
+                         FROM pg_stat_database WHERE datname = current_database()\
+                     ), tables AS (\
+                         SELECT count(*) AS total, sum(n_dead_tup) AS dead_tuples \
+                         FROM pg_stat_user_tables\
+                     ) \
+                     SELECT 'Size' AS metric, database_size AS value FROM db_size \
+                     UNION ALL SELECT 'Connections', total::text FROM connections \
+                     UNION ALL SELECT 'Active', active::text FROM connections \
+                     UNION ALL SELECT 'Cache Hit %', hit_pct::text FROM cache \
+                     UNION ALL SELECT 'Tables', total::text FROM tables \
+                     UNION ALL SELECT 'Dead Tuples', dead_tuples::text FROM tables",
+                ),
+            ];
+
+            for (id, label, icon, sql) in &admin_items {
+                let sql_owned = sql.to_string();
+
+                rows.push(
+                    ListItem::new(SharedString::from(format!("tree-{id}")))
+                        .indent_level(1)
+                        .indent_step_size(px(12.))
+                        .spacing(ListItemSpacing::ExtraDense)
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Icon::new(*icon).size(IconSize::XSmall).color(Color::Muted))
+                                .child(Label::new(label.to_string()).size(LabelSize::Small)),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.execute_in_result_panel(&sql_owned, window, cx);
+                        }))
+                        .into_any_element(),
+                );
+            }
         }
 
         div().flex().flex_col().children(rows)
@@ -1968,101 +2121,178 @@ impl ConnectionPanel {
 
     /// Render a compact toolbar with quick action icon buttons for common database tasks.
     /// Shown when connected, between the connection info bar and the schema tree.
+    /// Row 1: Query/performance tools. Row 2: Server admin tools.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .px_2()
-            .py_1()
-            .gap_1()
+        v_flex()
             .border_b_1()
             .border_color(cx.theme().colors().border)
-            .flex_wrap()
+            // Row 1: Query tools
             .child(
-                IconButton::new("tb-sessions", IconName::Person)
-                    .icon_size(IconSize::XSmall)
-                    .style(ButtonStyle::Subtle)
-                    .tooltip(Tooltip::text("Active Sessions"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.execute_in_result_panel(
-                            "SELECT pid, usename AS user_name, datname AS database, state, \
-                             CASE WHEN state = 'active' THEN (now() - query_start)::text ELSE '' END AS duration, \
-                             LEFT(query, 200) AS query \
-                             FROM pg_stat_activity WHERE datname IS NOT NULL ORDER BY state DESC, query_start",
-                            window,
-                            cx,
-                        );
-                    })),
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        IconButton::new("tb-sessions", IconName::Person)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Active Sessions"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "SELECT pid, usename AS user_name, datname AS database, state, \
+                                     CASE WHEN state = 'active' THEN (now() - query_start)::text ELSE '' END AS duration, \
+                                     LEFT(query, 200) AS query \
+                                     FROM pg_stat_activity WHERE datname IS NOT NULL ORDER BY state DESC, query_start",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        IconButton::new("tb-locks", IconName::LockOutlined)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("View Locks"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "SELECT blocked_locks.pid AS blocked_pid, \
+                                     LEFT(blocked_activity.query, 100) AS blocked_query, \
+                                     blocking_locks.pid AS blocking_pid, \
+                                     LEFT(blocking_activity.query, 100) AS blocking_query \
+                                     FROM pg_catalog.pg_locks blocked_locks \
+                                     JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid \
+                                     JOIN pg_catalog.pg_locks blocking_locks ON blocking_locks.locktype = blocked_locks.locktype \
+                                         AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database \
+                                         AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation \
+                                         AND blocking_locks.pid != blocked_locks.pid \
+                                     JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid \
+                                     WHERE NOT blocked_locks.granted",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        IconButton::new("tb-sizes", IconName::DatabaseZap)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Table Sizes"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "SELECT schemaname || '.' || tablename AS table_name, \
+                                     pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size, \
+                                     (SELECT reltuples::bigint FROM pg_class WHERE relname = tablename) AS est_rows \
+                                     FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+                                     ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC LIMIT 20",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        IconButton::new("tb-slow", IconName::Clock)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Slow Queries"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "SELECT pid, now() - query_start AS duration, usename, LEFT(query, 200) AS query \
+                                     FROM pg_stat_activity WHERE state != 'idle' AND query NOT ILIKE '%pg_stat_activity%' \
+                                     ORDER BY duration DESC LIMIT 10",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        IconButton::new("tb-bloat", IconName::Flame)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Table Bloat"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "SELECT schemaname || '.' || tablename AS table_name, \
+                                     n_dead_tup AS dead_rows, n_live_tup AS live_rows, \
+                                     CASE WHEN n_live_tup > 0 THEN round(100.0 * n_dead_tup / n_live_tup, 1) ELSE 0 END AS bloat_pct \
+                                     FROM pg_stat_user_tables WHERE n_dead_tup > 100 ORDER BY n_dead_tup DESC LIMIT 10",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
             )
+            // Row 2: Admin tools
             .child(
-                IconButton::new("tb-locks", IconName::LockOutlined)
-                    .icon_size(IconSize::XSmall)
-                    .style(ButtonStyle::Subtle)
-                    .tooltip(Tooltip::text("View Locks"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.execute_in_result_panel(
-                            "SELECT blocked_locks.pid AS blocked_pid, \
-                             LEFT(blocked_activity.query, 100) AS blocked_query, \
-                             blocking_locks.pid AS blocking_pid, \
-                             LEFT(blocking_activity.query, 100) AS blocking_query \
-                             FROM pg_catalog.pg_locks blocked_locks \
-                             JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid \
-                             JOIN pg_catalog.pg_locks blocking_locks ON blocking_locks.locktype = blocked_locks.locktype \
-                                 AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database \
-                                 AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation \
-                                 AND blocking_locks.pid != blocked_locks.pid \
-                             JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid \
-                             WHERE NOT blocked_locks.granted",
-                            window,
-                            cx,
-                        );
-                    })),
-            )
-            .child(
-                IconButton::new("tb-sizes", IconName::DatabaseZap)
-                    .icon_size(IconSize::XSmall)
-                    .style(ButtonStyle::Subtle)
-                    .tooltip(Tooltip::text("Table Sizes"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.execute_in_result_panel(
-                            "SELECT schemaname || '.' || tablename AS table_name, \
-                             pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size, \
-                             (SELECT reltuples::bigint FROM pg_class WHERE relname = tablename) AS est_rows \
-                             FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
-                             ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC LIMIT 20",
-                            window,
-                            cx,
-                        );
-                    })),
-            )
-            .child(
-                IconButton::new("tb-slow", IconName::Clock)
-                    .icon_size(IconSize::XSmall)
-                    .style(ButtonStyle::Subtle)
-                    .tooltip(Tooltip::text("Slow Queries"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.execute_in_result_panel(
-                            "SELECT pid, now() - query_start AS duration, usename, LEFT(query, 200) AS query \
-                             FROM pg_stat_activity WHERE state != 'idle' AND query NOT ILIKE '%pg_stat_activity%' \
-                             ORDER BY duration DESC LIMIT 10",
-                            window,
-                            cx,
-                        );
-                    })),
-            )
-            .child(
-                IconButton::new("tb-bloat", IconName::Flame)
-                    .icon_size(IconSize::XSmall)
-                    .style(ButtonStyle::Subtle)
-                    .tooltip(Tooltip::text("Table Bloat"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.execute_in_result_panel(
-                            "SELECT schemaname || '.' || tablename AS table_name, \
-                             n_dead_tup AS dead_rows, n_live_tup AS live_rows, \
-                             CASE WHEN n_live_tup > 0 THEN round(100.0 * n_dead_tup / n_live_tup, 1) ELSE 0 END AS bloat_pct \
-                             FROM pg_stat_user_tables WHERE n_dead_tup > 100 ORDER BY n_dead_tup DESC LIMIT 10",
-                            window,
-                            cx,
-                        );
-                    })),
+                h_flex()
+                    .px_2()
+                    .pb_1()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        IconButton::new("tb-health", IconName::Info)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Health Check"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "WITH db_size AS (\
+                                         SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size\
+                                     ), connections AS (\
+                                         SELECT count(*) AS total, \
+                                         count(*) FILTER (WHERE state = 'active') AS active, \
+                                         count(*) FILTER (WHERE state = 'idle') AS idle \
+                                         FROM pg_stat_activity WHERE datname = current_database()\
+                                     ), cache AS (\
+                                         SELECT CASE WHEN sum(blks_hit) + sum(blks_read) > 0 \
+                                         THEN round(100.0 * sum(blks_hit) / (sum(blks_hit) + sum(blks_read)), 2) \
+                                         ELSE 0 END AS hit_pct \
+                                         FROM pg_stat_database WHERE datname = current_database()\
+                                     ), tables AS (\
+                                         SELECT count(*) AS total, sum(n_dead_tup) AS dead_tuples \
+                                         FROM pg_stat_user_tables\
+                                     ) \
+                                     SELECT 'Size' AS metric, database_size AS value FROM db_size \
+                                     UNION ALL SELECT 'Connections', total::text FROM connections \
+                                     UNION ALL SELECT 'Active', active::text FROM connections \
+                                     UNION ALL SELECT 'Cache Hit %', hit_pct::text FROM cache \
+                                     UNION ALL SELECT 'Tables', total::text FROM tables \
+                                     UNION ALL SELECT 'Dead Tuples', dead_tuples::text FROM tables",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        IconButton::new("tb-roles", IconName::Person)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Roles & Users"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "SELECT rolname AS role, rolsuper AS superuser, \
+                                     rolcreaterole AS can_create_role, rolcreatedb AS can_create_db, \
+                                     rolcanlogin AS can_login, rolconnlimit AS conn_limit \
+                                     FROM pg_roles WHERE rolname NOT LIKE 'pg_%' ORDER BY rolname",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        IconButton::new("tb-settings", IconName::ListFilter)
+                            .icon_size(IconSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text("Server Settings"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.execute_in_result_panel(
+                                    "SELECT name, setting, unit, short_desc \
+                                     FROM pg_settings WHERE source != 'default' ORDER BY name",
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    ),
             )
     }
 
