@@ -5,14 +5,17 @@ mod sql_completion;
 pub mod sql_completion_provider;
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use editor::Editor;
 use editor::actions::SelectAll;
 use gpui::{App, AppContext as _, ClipboardItem, Context, Entity, Window, actions};
 use picker::Picker;
+use tokio::runtime::Runtime;
 use workspace::Workspace;
 
 use pgblade_core::connection::{ConnectionId, ConnectionProfile, Environment, SshConfig, SslMode};
+use pgblade_core::driver::DatabaseSession;
 use result_panel::ResultPanelEvent;
 
 pub use connection_panel::ConnectionPanel;
@@ -91,7 +94,10 @@ actions!(
         AdminCommands,
         DetectEnvDatabase,
         SetTimeout,
-        RefreshSchema
+        RefreshSchema,
+        LintSql,
+        CompareExplain,
+        ExplainQueryAI
     ]
 );
 
@@ -462,6 +468,21 @@ pub fn init(cx: &mut App) {
                         panel.fetch_schema(cx);
                     });
                 }
+            });
+
+            // Register the LintSql action on the workspace
+            workspace.register_action(|workspace, _: &LintSql, window, cx| {
+                lint_sql_action(workspace, window, cx);
+            });
+
+            // Register the CompareExplain action on the workspace
+            workspace.register_action(|workspace, _: &CompareExplain, window, cx| {
+                compare_explain_action(workspace, window, cx);
+            });
+
+            // Register the ExplainQueryAI action on the workspace
+            workspace.register_action(|workspace, _: &ExplainQueryAI, window, cx| {
+                explain_query_ai_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -1736,7 +1757,8 @@ All actions are available in the command palette:
   Search Objects, Disconnect, Create Function, Create Trigger,
   Stat Statements, Table Access Stats, Active Queries,
   Connection Limits, Maintenance Recommendations,
-  Duplicate Indexes, Show Shortcuts";
+  Duplicate Indexes, Show Shortcuts, Lint SQL, Compare Explain,
+  Explain Query AI";
 
     workspace.open_panel::<ResultPanel>(window, cx);
     if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
@@ -2690,4 +2712,388 @@ fn set_timeout_action(workspace: &mut Workspace, window: &mut Window, cx: &mut C
     };
 
     execute_system_query(workspace, &sql, window, cx);
+}
+
+// ---------------------------------------------------------------------------
+// Feature: SQL Linting (Common Anti-Pattern Detection)
+// ---------------------------------------------------------------------------
+
+/// Analyze the current SQL for common anti-patterns and display warnings.
+/// This is a local analysis that does not require a database connection.
+fn lint_sql_action(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(sql) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+
+    let mut warnings: Vec<(String, String, String)> = Vec::new();
+    let upper = sql.to_uppercase();
+
+    // SELECT *
+    if upper.contains("SELECT *") && !upper.contains("COUNT(*)") && !upper.contains("EXISTS") {
+        warnings.push((
+            "SELECT *".to_string(),
+            "Specify columns explicitly. SELECT * fetches unnecessary data and breaks if schema changes.".to_string(),
+            "MEDIUM".to_string(),
+        ));
+    }
+
+    // DELETE/UPDATE without WHERE
+    if (upper.contains("DELETE FROM") || upper.starts_with("UPDATE")) && !upper.contains("WHERE") {
+        warnings.push((
+            "Missing WHERE clause".to_string(),
+            "DELETE/UPDATE without WHERE affects ALL rows. This is usually a mistake.".to_string(),
+            "CRITICAL".to_string(),
+        ));
+    }
+
+    // LIKE with leading wildcard
+    if upper.contains("LIKE '%") || upper.contains("ILIKE '%") {
+        warnings.push((
+            "Leading wildcard in LIKE".to_string(),
+            "LIKE '%value' cannot use indexes. Consider full-text search (tsvector) or trigram indexes (pg_trgm).".to_string(),
+            "HIGH".to_string(),
+        ));
+    }
+
+    // Implicit type casting in WHERE
+    if upper.contains("::TEXT") && upper.contains("WHERE") {
+        warnings.push((
+            "Type casting in WHERE".to_string(),
+            "Casting columns in WHERE clauses prevents index usage. Cast the parameter instead."
+                .to_string(),
+            "MEDIUM".to_string(),
+        ));
+    }
+
+    // NOT IN with subquery
+    if upper.contains("NOT IN (SELECT") {
+        warnings.push((
+            "NOT IN with subquery".to_string(),
+            "NOT IN returns no rows if any value is NULL. Use NOT EXISTS instead.".to_string(),
+            "HIGH".to_string(),
+        ));
+    }
+
+    // ORDER BY without LIMIT
+    if upper.contains("ORDER BY") && !upper.contains("LIMIT") && !upper.contains("FETCH") {
+        warnings.push((
+            "ORDER BY without LIMIT".to_string(),
+            "Sorting entire result set is expensive. Add LIMIT for pagination.".to_string(),
+            "LOW".to_string(),
+        ));
+    }
+
+    // Cartesian join (FROM a, b without WHERE)
+    if upper.contains("FROM") && !upper.contains("JOIN") && !upper.contains("WHERE") {
+        if let Some(from_idx) = upper.find("FROM") {
+            let after_from = &upper[from_idx..];
+            if after_from.contains(',') {
+                warnings.push((
+                    "Possible Cartesian join".to_string(),
+                    "Multiple tables in FROM without WHERE produces a cross product. Use explicit JOIN.".to_string(),
+                    "HIGH".to_string(),
+                ));
+            }
+        }
+    }
+
+    // DISTINCT with JOIN
+    if upper.contains("SELECT DISTINCT") && upper.contains("JOIN") {
+        warnings.push((
+            "DISTINCT with JOIN".to_string(),
+            "DISTINCT after JOIN often indicates a join producing duplicates. Check join conditions.".to_string(),
+            "MEDIUM".to_string(),
+        ));
+    }
+
+    // Deep subquery nesting
+    let subquery_count = upper.matches("(SELECT").count();
+    if subquery_count > 2 {
+        let subquery_msg = format!(
+            "{subquery_count} nested subqueries detected. Consider using CTEs (WITH clause) for readability."
+        );
+        warnings.push((
+            "Deep subquery nesting".to_string(),
+            subquery_msg,
+            "MEDIUM".to_string(),
+        ));
+    }
+
+    // COUNT(*) without WHERE on entire table
+    if upper.contains("COUNT(*)") && !upper.contains("WHERE") && !upper.contains("GROUP BY") {
+        warnings.push((
+            "Unfiltered COUNT(*)".to_string(),
+            "COUNT(*) without WHERE scans the entire table. This is slow on large tables."
+                .to_string(),
+            "LOW".to_string(),
+        ));
+    }
+
+    // Build output
+    let mut output = format!(
+        "=== SQL Lint Report ===\n{} issue(s) found\n\n",
+        warnings.len()
+    );
+
+    if warnings.is_empty() {
+        output.push_str("No issues detected. Query looks good!\n");
+    } else {
+        for (i, (title, desc, severity)) in warnings.iter().enumerate() {
+            output.push_str(&format!(
+                "{}. [{}] {}\n   {}\n\n",
+                i + 1,
+                severity,
+                title,
+                desc
+            ));
+        }
+
+        output.push_str("---\nSeverity levels:\n");
+        output.push_str("  CRITICAL: Will cause data loss or incorrect results\n");
+        output.push_str("  HIGH: Performance or correctness issue\n");
+        output.push_str("  MEDIUM: Could be improved\n");
+        output.push_str("  LOW: Suggestion\n");
+    }
+
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        workspace.open_panel::<ResultPanel>(window, cx);
+        result_panel.update(cx, |panel, cx| {
+            panel.show_ddl(output, cx);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feature: Query Plan Comparison
+// ---------------------------------------------------------------------------
+
+/// Run EXPLAIN ANALYZE on two queries separated by `---` and show both plans
+/// side by side for comparison.
+fn compare_explain_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let sql = editor.read(cx).text(cx);
+
+    // Split by "---" separator
+    let parts: Vec<&str> = sql.split("---").collect();
+    if parts.len() < 2 {
+        if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+            workspace.open_panel::<ResultPanel>(window, cx);
+            result_panel.update(cx, |panel, cx| {
+                panel.show_ddl(
+                    "To compare query plans, write two queries separated by ---\n\n\
+                     Example:\n\
+                     SELECT * FROM users WHERE email = 'test@test.com'\n\
+                     ---\n\
+                     SELECT * FROM users WHERE id = 1"
+                        .to_string(),
+                    cx,
+                );
+            });
+        }
+        return;
+    }
+
+    let query1 = parts[0].trim().to_string();
+    let query2 = parts[1].trim().to_string();
+
+    if query1.is_empty() || query2.is_empty() {
+        return;
+    }
+
+    let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) else {
+        return;
+    };
+    let Some(session) = conn_panel.read(cx).session() else {
+        tracing::warn!("CompareExplain: no active database connection");
+        return;
+    };
+    let runtime = conn_panel.read(cx).runtime();
+
+    let explain1 = format!(
+        "EXPLAIN (ANALYZE, COSTS, BUFFERS, FORMAT JSON) {}",
+        query1.trim_end_matches(';')
+    );
+    let explain2 = format!(
+        "EXPLAIN (ANALYZE, COSTS, BUFFERS, FORMAT JSON) {}",
+        query2.trim_end_matches(';')
+    );
+
+    workspace.open_panel::<ResultPanel>(window, cx);
+    let Some(result_panel) = workspace.panel::<ResultPanel>(cx) else {
+        return;
+    };
+
+    result_panel.update(cx, |panel, cx| {
+        // Show loading
+        panel.show_ddl("Comparing query plans...".to_string(), cx);
+
+        let tab_idx = panel.tabs.len() - 1;
+
+        let session1: Arc<dyn DatabaseSession> = session.clone();
+        let session2: Arc<dyn DatabaseSession> = session;
+        let runtime1: Arc<Runtime> = runtime.clone();
+        let runtime2: Arc<Runtime> = runtime;
+        let q1 = query1.clone();
+        let q2 = query2.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result1 = runtime1
+                .spawn({
+                    let session = session1;
+                    let sql = explain1;
+                    async move { session.execute(&sql).await }
+                })
+                .await;
+
+            let result2 = runtime2
+                .spawn({
+                    let session = session2;
+                    let sql = explain2;
+                    async move { session.execute(&sql).await }
+                })
+                .await;
+
+            let plan1 = match result1 {
+                Ok(Ok(rs)) => rs
+                    .rows
+                    .first()
+                    .and_then(|r| r.first())
+                    .map(|c| c.display())
+                    .unwrap_or_else(|| "Plan 1 failed".to_string()),
+                Ok(Err(e)) => format!("Plan 1 error: {e}"),
+                Err(e) => format!("Plan 1 execution failed: {e}"),
+            };
+
+            let plan2 = match result2 {
+                Ok(Ok(rs)) => rs
+                    .rows
+                    .first()
+                    .and_then(|r| r.first())
+                    .map(|c| c.display())
+                    .unwrap_or_else(|| "Plan 2 failed".to_string()),
+                Ok(Err(e)) => format!("Plan 2 error: {e}"),
+                Err(e) => format!("Plan 2 execution failed: {e}"),
+            };
+
+            let formatted1 = result_panel::format_explain_plan(&plan1);
+            let formatted2 = result_panel::format_explain_plan(&plan2);
+
+            let comparison = format!(
+                "=== Query Plan Comparison ===\n\n\
+                 --- Query 1 ---\n{}\n\n\
+                 --- Plan 1 ---\n{}\n\n\
+                 ===============\n\n\
+                 --- Query 2 ---\n{}\n\n\
+                 --- Plan 2 ---\n{}\n",
+                q1, formatted1, q2, formatted2
+            );
+
+            this.update(cx, |panel, cx| {
+                if let Some(tab) = panel.tabs.get_mut(tab_idx) {
+                    tab.state = result_panel::ResultState::Ddl(comparison);
+                    tab.label = "Plan Compare".to_string();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Feature: Explain This Query (AI Context Preparation)
+// ---------------------------------------------------------------------------
+
+/// Prepare AI context for query analysis and copy to clipboard.
+/// Includes the SQL query and available schema information so the user
+/// can paste it into Zed's AI assistant for analysis.
+fn explain_query_ai_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(sql) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+
+    // Build context with schema information
+    let mut context =
+        format!("Please explain and optimize this PostgreSQL query:\n\n```sql\n{sql}\n```\n\n");
+
+    // Add schema context if available
+    if let Some(conn_panel) = workspace.panel::<ConnectionPanel>(cx) {
+        if let Some(schema_tree) = conn_panel.read(cx).schema_tree() {
+            context.push_str("## Available Schema:\n\n");
+            for schema in &schema_tree.schemas {
+                for table in &schema.tables {
+                    context.push_str(&format!("### {}.{}\n", schema.info.name, table.info.name));
+                    for col in &table.columns {
+                        let pk = if col.is_primary_key { " (PK)" } else { "" };
+                        context.push_str(&format!("- {} {}{}\n", col.name, col.data_type, pk));
+                    }
+                    if !table.indexes.is_empty() {
+                        context.push_str("Indexes:\n");
+                        for idx in &table.indexes {
+                            let unique = if idx.is_unique { "UNIQUE " } else { "" };
+                            context.push_str(&format!(
+                                "- {}{} on ({})\n",
+                                unique,
+                                idx.name,
+                                idx.columns.join(", ")
+                            ));
+                        }
+                    }
+                    context.push('\n');
+                }
+            }
+        }
+    }
+
+    context.push_str(
+        "\nPlease:\n\
+         1. Explain what this query does\n\
+         2. Identify any performance issues\n\
+         3. Suggest optimizations\n\
+         4. Recommend missing indexes if applicable\n",
+    );
+
+    // Copy to clipboard so user can paste into Zed's AI assistant
+    cx.write_to_clipboard(ClipboardItem::new_string(context.clone()));
+
+    // Show in result panel
+    if let Some(result_panel) = workspace.panel::<ResultPanel>(cx) {
+        workspace.open_panel::<ResultPanel>(window, cx);
+        result_panel.update(cx, |panel, cx| {
+            panel.show_ddl(
+                format!(
+                    "AI context copied to clipboard!\n\n\
+                     Open Zed's AI assistant (Cmd+;) and paste to get an analysis.\n\n\
+                     ---\n\n{context}"
+                ),
+                cx,
+            );
+        });
+    }
 }

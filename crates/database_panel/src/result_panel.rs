@@ -30,7 +30,7 @@ pub fn register(workspace: &mut Workspace) {
 }
 
 #[derive(Clone)]
-enum ResultState {
+pub(crate) enum ResultState {
     Loading,
     Success {
         columns: Vec<ColumnMeta>,
@@ -43,9 +43,9 @@ enum ResultState {
 }
 
 #[derive(Clone)]
-struct ResultTab {
-    label: String,
-    state: ResultState,
+pub(crate) struct ResultTab {
+    pub(crate) label: String,
+    pub(crate) state: ResultState,
     sort_column: Option<usize>,
     sort_ascending: bool,
     /// The source table (schema, table_name) for row editing.
@@ -65,7 +65,7 @@ struct ResultTab {
 pub struct ResultPanel {
     focus_handle: FocusHandle,
     active: bool,
-    tabs: Vec<ResultTab>,
+    pub(crate) tabs: Vec<ResultTab>,
     active_tab: usize,
     /// Currently selected row index (for inline editing).
     selected_row: Option<usize>,
@@ -1884,7 +1884,7 @@ impl Panel for ResultPanel {
 }
 
 /// Parse EXPLAIN (FORMAT JSON) output and produce a human-readable tree.
-fn format_explain_plan(json_text: &str) -> String {
+pub fn format_explain_plan(json_text: &str) -> String {
     let Ok(plan) = serde_json::from_str::<serde_json::Value>(json_text) else {
         // Not valid JSON — return as-is (plain text EXPLAIN output)
         return json_text.to_string();
@@ -1941,7 +1941,7 @@ fn format_explain_plan(json_text: &str) -> String {
     output
 }
 
-fn format_plan_node(node: &serde_json::Value, depth: usize, output: &mut String) {
+pub fn format_plan_node(node: &serde_json::Value, depth: usize, output: &mut String) {
     let indent = "  ".repeat(depth);
 
     let node_type = node
