@@ -81,7 +81,9 @@ actions!(
         TableStructure,
         GenerateAlterTable,
         HealthCheck,
-        CopyQualifiedName
+        CopyQualifiedName,
+        GenerateGrant,
+        AdminCommands
     ]
 );
 
@@ -423,6 +425,16 @@ pub fn init(cx: &mut App) {
             // Register the CopyQualifiedName action on the workspace
             workspace.register_action(|workspace, _: &CopyQualifiedName, _window, cx| {
                 copy_qualified_name_action(workspace, cx);
+            });
+
+            // Register the GenerateGrant action on the workspace
+            workspace.register_action(|workspace, _: &GenerateGrant, window, cx| {
+                generate_grant_action(workspace, window, cx);
+            });
+
+            // Register the AdminCommands action on the workspace
+            workspace.register_action(|workspace, _: &AdminCommands, window, cx| {
+                admin_commands_action(workspace, window, cx);
             });
 
             if let Some(window) = window {
@@ -2371,4 +2383,62 @@ fn copy_qualified_name_action(workspace: &mut Workspace, cx: &mut Context<Worksp
     };
 
     cx.write_to_clipboard(ClipboardItem::new_string(qualified));
+}
+
+/// Generate GRANT/REVOKE statements for the selected table name.
+fn generate_grant_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(active_item) = workspace.active_item(cx) else {
+        return;
+    };
+    let Some(editor) = active_item.act_as::<Editor>(cx) else {
+        return;
+    };
+    let Some(selected) = get_sql_from_editor(&editor, cx) else {
+        return;
+    };
+    let table = selected.trim();
+
+    let sql = format!(
+        "-- Grant permissions on {table}\n\
+         GRANT SELECT ON {table} TO role_name;\n\
+         GRANT INSERT, UPDATE, DELETE ON {table} TO role_name;\n\
+         GRANT ALL PRIVILEGES ON {table} TO role_name;\n\n\
+         -- Revoke permissions\n\
+         REVOKE ALL PRIVILEGES ON {table} FROM role_name;\n\n\
+         -- Grant with grant option\n\
+         GRANT SELECT ON {table} TO role_name WITH GRANT OPTION;"
+    );
+    insert_into_editor(workspace, &sql, window, cx);
+}
+
+/// Insert common PostgreSQL admin commands into the active editor.
+fn admin_commands_action(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let sql = "-- Common PostgreSQL Admin Commands\n\n\
+        -- Terminate all connections to a database\n\
+        SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'database_name' AND pid <> pg_backend_pid();\n\n\
+        -- Reload PostgreSQL configuration\n\
+        SELECT pg_reload_conf();\n\n\
+        -- Check if PostgreSQL is in recovery\n\
+        SELECT pg_is_in_recovery();\n\n\
+        -- Current WAL position\n\
+        SELECT pg_current_wal_lsn();\n\n\
+        -- Cancel a running query (graceful)\n\
+        SELECT pg_cancel_backend(pid);\n\n\
+        -- Terminate a backend (forceful)\n\
+        SELECT pg_terminate_backend(pid);\n\n\
+        -- List all databases with sizes\n\
+        SELECT datname, pg_size_pretty(pg_database_size(datname)) FROM pg_database ORDER BY pg_database_size(datname) DESC;\n\n\
+        -- Show current connections per database\n\
+        SELECT datname, count(*) FROM pg_stat_activity GROUP BY datname ORDER BY count(*) DESC;\n\n\
+        -- Reset statistics\n\
+        SELECT pg_stat_reset();";
+    insert_into_editor(workspace, sql, window, cx);
 }

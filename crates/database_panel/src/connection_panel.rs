@@ -1975,8 +1975,25 @@ impl ConnectionPanel {
             .border_color(cx.theme().colors().border);
 
         if let Some(profile) = &self.connected_profile {
-            // Connected: show database name + disconnect/refresh buttons
+            // Connected: show database name + schema summary + disconnect/refresh buttons
             let profile_name = profile.name.clone();
+
+            // Build schema summary string
+            let schema_summary = self.schema_tree.as_ref().map(|tree| {
+                let mut table_count = 0;
+                let mut view_count = 0;
+                let mut func_count = 0;
+                for schema in &tree.schemas {
+                    table_count += schema.tables.len();
+                    view_count += schema.views.len();
+                    func_count += schema.functions.len();
+                }
+                format!(
+                    "{} tables, {} views, {} functions",
+                    table_count, view_count, func_count
+                )
+            });
+
             header
                 .child(
                     h_flex()
@@ -1987,7 +2004,12 @@ impl ConnectionPanel {
                             Label::new(profile_name)
                                 .size(LabelSize::Small)
                                 .weight(FontWeight::SEMIBOLD),
-                        ),
+                        )
+                        .children(schema_summary.map(|summary| {
+                            Label::new(summary)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                        })),
                 )
                 .child(
                     h_flex()

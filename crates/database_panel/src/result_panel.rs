@@ -1840,6 +1840,25 @@ fn format_explain_plan(json_text: &str) -> String {
         return json_text.to_string();
     };
 
+    // Add execution summary at the top
+    if let Some(plan_entry) = plan_array.first() {
+        if let Some(plan_node) = plan_entry.get("Plan") {
+            let total_time = plan_node
+                .get("Actual Total Time")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let total_rows = plan_node
+                .get("Actual Rows")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            output.push_str(&format!("=== Execution Summary ===\n"));
+            output.push_str(&format!(
+                "Total Time: {:.3}ms | Rows: {}\n\n",
+                total_time, total_rows
+            ));
+        }
+    }
+
     for plan_entry in plan_array {
         if let Some(plan_node) = plan_entry.get("Plan") {
             format_plan_node(plan_node, 0, &mut output);
@@ -1876,16 +1895,8 @@ fn format_plan_node(node: &serde_json::Value, depth: usize, output: &mut String)
         .unwrap_or("");
     let alias = node.get("Alias").and_then(|v| v.as_str()).unwrap_or("");
 
-    let startup_cost = node
-        .get("Startup Cost")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
     let total_cost = node
         .get("Total Cost")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let actual_startup = node
-        .get("Actual Startup Time")
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     let actual_total = node
@@ -1896,10 +1907,32 @@ fn format_plan_node(node: &serde_json::Value, depth: usize, output: &mut String)
         .get("Actual Rows")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
+    let plan_rows = node.get("Plan Rows").and_then(|v| v.as_i64()).unwrap_or(0);
     let loops = node
         .get("Actual Loops")
         .and_then(|v| v.as_i64())
         .unwrap_or(1);
+
+    // Warning indicators
+    let mut warnings = Vec::new();
+    if actual_total > 100.0 {
+        warnings.push("SLOW");
+    }
+    if plan_rows > 0
+        && rows > 0
+        && (rows as f64 / plan_rows as f64 > 10.0 || (plan_rows as f64 / rows as f64) > 10.0)
+    {
+        warnings.push("BAD ESTIMATE");
+    }
+    if node_type == "Seq Scan" && rows > 10000 {
+        warnings.push("LARGE SEQ SCAN");
+    }
+
+    let warning_str = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("  !! {} !!", warnings.join(", "))
+    };
 
     let relation_info = if !relation.is_empty() {
         if !alias.is_empty() && alias != relation {
@@ -1912,42 +1945,82 @@ fn format_plan_node(node: &serde_json::Value, depth: usize, output: &mut String)
     };
 
     output.push_str(&format!(
-        "{indent}-> {node_type}{relation_info}  (cost={startup_cost:.2}..{total_cost:.2} rows={rows} loops={loops})\n"
+        "{indent}-> {node_type}{relation_info}  (rows={rows} loops={loops}){warning_str}\n"
     ));
     output.push_str(&format!(
-        "{indent}   Actual: {actual_startup:.3}..{actual_total:.3} ms\n"
+        "{indent}   Cost: {:.2}  Actual: {:.3}ms\n",
+        total_cost, actual_total
     ));
 
     // Filter
     if let Some(filter) = node.get("Filter").and_then(|v| v.as_str()) {
-        output.push_str(&format!("{indent}   Filter: {filter}\n"));
+        let rows_removed = node
+            .get("Rows Removed by Filter")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        if rows_removed > 0 {
+            output.push_str(&format!(
+                "{indent}   Filter: {filter} (removed {rows_removed} rows)\n"
+            ));
+        } else {
+            output.push_str(&format!("{indent}   Filter: {filter}\n"));
+        }
     }
 
     // Join conditions
-    if let Some(cond) = node.get("Hash Cond").and_then(|v| v.as_str()) {
-        output.push_str(&format!("{indent}   Hash Cond: {cond}\n"));
-    }
-    if let Some(cond) = node.get("Join Filter").and_then(|v| v.as_str()) {
-        output.push_str(&format!("{indent}   Join Filter: {cond}\n"));
+    for key in &[
+        "Hash Cond",
+        "Join Filter",
+        "Index Cond",
+        "Merge Cond",
+        "Recheck Cond",
+    ] {
+        if let Some(cond) = node.get(*key).and_then(|v| v.as_str()) {
+            output.push_str(&format!("{indent}   {key}: {cond}\n"));
+        }
     }
 
-    // Sort key
+    // Sort info
     if let Some(sort_key) = node.get("Sort Key").and_then(|v| v.as_array()) {
         let keys: Vec<&str> = sort_key.iter().filter_map(|v| v.as_str()).collect();
         output.push_str(&format!("{indent}   Sort Key: {}\n", keys.join(", ")));
-    }
-
-    // Shared buffers
-    if let Some(hit) = node.get("Shared Hit Blocks").and_then(|v| v.as_i64()) {
-        let read = node
-            .get("Shared Read Blocks")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        if hit > 0 || read > 0 {
+        if let Some(method) = node.get("Sort Method").and_then(|v| v.as_str()) {
+            let space = node
+                .get("Sort Space Used")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let space_type = node
+                .get("Sort Space Type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             output.push_str(&format!(
-                "{indent}   Buffers: shared hit={hit} read={read}\n"
+                "{indent}   Sort Method: {method} ({space}kB {space_type})\n"
             ));
         }
+    }
+
+    // Buffers
+    let hit = node
+        .get("Shared Hit Blocks")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let read = node
+        .get("Shared Read Blocks")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let written = node
+        .get("Shared Written Blocks")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    if hit > 0 || read > 0 || written > 0 {
+        output.push_str(&format!(
+            "{indent}   Buffers: hit={hit} read={read} written={written}\n"
+        ));
+    }
+
+    // Workers
+    if let Some(workers) = node.get("Workers").and_then(|v| v.as_array()) {
+        output.push_str(&format!("{indent}   Workers: {} launched\n", workers.len()));
     }
 
     // Child plans
