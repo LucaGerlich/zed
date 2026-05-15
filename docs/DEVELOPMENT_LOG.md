@@ -79,40 +79,65 @@ PgBlade started as a standalone Rust/GPUI application (pgblade-standalone), then
 
 ---
 
-## Current Stats (as of commit 45)
-- **45 commits** on the Zed fork
-- **~21K lines** of database-specific code
-- **65+ command palette actions**
-- **4 crates**: database_panel (~3K), pgblade-core (~1.5K), pgblade-postgres (~500), pgblade-security (~70)
+## Current Stats (as of commit 53)
+- **53 commits** on the Zed fork
+- **~15K lines** of database-specific code (measured, not estimated)
+- **102 registered workspace actions**
+- **4 crates**: database_panel (~10K), pgblade-core (~1.5K), pgblade-postgres (~500), pgblade-security (~70)
 - **Zero clippy warnings**, all builds clean
+- **8 schema tree admin nodes**, **10 table action buttons**, **8 toolbar buttons**
+- **Status bar indicator** with environment color coding
 
 ---
 
-## What's Built Next (Phase 3)
+## Phase 3: Smart Integrations (commits 47-49) -- COMPLETED
+- [x] `.env` file integration — auto-detect DATABASE_URL from project .env files
+- [x] Connection health ping — background SELECT 1 every 30s, auto-disconnect on failure
+- [x] Query timeout configuration — SetTimeout action for statement_timeout
+- [x] Schema change detection — auto-refresh tree after DDL, RefreshSchema action
 
-### Batch 1: Smart Integrations
-- [ ] `.env` file integration — auto-detect DATABASE_URL from project .env files
-- [ ] Connection health ping — background check every 30s, yellow warning on drop
-- [ ] Query timeout configuration — set statement_timeout per connection
-- [ ] Schema change detection — detect new/dropped objects, offer refresh
+## Phase 4: AI & Intelligence (commit 48) -- COMPLETED
+- [x] SQL linting — 10 anti-patterns with severity levels (CRITICAL/HIGH/MEDIUM/LOW)
+- [x] Query plan comparison — two queries separated by ---, side-by-side EXPLAIN
+- [x] AI context builder — prepares query + schema for Zed's Claude assistant
 
-### Batch 2: AI & Intelligence
-- [ ] AI SQL assistant — explain query, suggest optimizations via Zed's Claude
-- [ ] SQL linting — warn about SELECT *, missing WHERE on DELETE, etc.
-- [ ] Query plan comparison — diff EXPLAIN before/after changes
+## Phase 5: Unique Zed Features (commit 49) -- COMPLETED
+- [x] SQL in any file — strips Python/JS/Rust/Go string delimiters on Cmd+Enter
+- [x] Data masking — toggle masks password/token/email/phone columns at render time
+- [x] Result set pinning — pinned tabs survive close and clear
+- [x] Connection color indicator — red (production), yellow (staging), green (dev) in status bar
+- [x] Migration file detection — scans 8 common directories
+- [x] Migration template generation — timestamped UP/DOWN
 
-### Batch 3: Multi-Connection
-- [ ] Multiple simultaneous connections — switch between dev/staging/prod
-- [ ] Custom color per connection — red for production, green for dev
-- [ ] Query result diffing — same query on two connections, show differences
+## Phase 6: Server Administration (commits 50-53) -- COMPLETED
+- [x] User/Role management — Create/Alter Role, Memberships, Permissions, Transfer Ownership
+- [x] Database management — Create Database/Schema, Object Ownership
+- [x] Security — RLS templates, View Policies, Security Audit
+- [x] Backup — Generate pg_dump commands (connection-aware)
+- [x] Monitoring — Connection Age, Checkpoint Stats, IO Stats, Database Activity
+- [x] pg_hba.conf viewer, Config File Locations
+- [x] Replication — Publications, Subscriptions, Event Triggers
+- [x] Admin nodes in schema tree (8 clickable nodes)
+- [x] Expanded toolbar (8 icon buttons in 2 rows)
+- [x] Code generation — CRUD, Index Patterns, Connection Strings, Partition Templates
+- [x] Performance analysis — 3-iteration query benchmark
+- [x] Data profiling — schema-aware null/distinct analysis
 
-### Batch 4: Unique Zed Features
-- [ ] SQL in any file — detect SQL strings in .py, .ts, .rs, execute inline
-- [ ] Migration file support — detect migration files, run up/down
-- [ ] Git-aware schema tracking — show tables changed in current git diff
-- [ ] Data masking — auto-mask sensitive columns on production connections
+## Phase 7: Stabilization (commits 44-45) -- COMPLETED
+- [x] 13 panic fixes (unchecked array indexing)
+- [x] 8 SQL injection points hardened with escape helpers
+- [x] Unicode-safe tab label truncation
+- [x] Large cell value truncation (500 chars)
+- [x] Clippy clean (zero warnings)
+- [x] Status bar connection indicator with environment color
+- [x] Comprehensive documentation (PGBLADE.md)
 
-### Batch 5: Monitoring
-- [ ] Slow query alerts — background monitor, notification on threshold
-- [ ] Result set pinning — keep a result tab from being replaced
-- [ ] Saved query folders — organize bookmarks by project
+## Remaining Ideas (not started)
+- [ ] Multiple simultaneous connections (switch between dev/staging/prod)
+- [ ] Query result diffing (same query on two connections)
+- [ ] Git-aware schema tracking (show tables changed in current git diff)
+- [ ] Slow query alerts (background monitor with notification)
+- [ ] Saved query folders (organize bookmarks by project)
+- [ ] Graphical query plan visualization (boxes + arrows, not text)
+- [ ] Column resizing in result grid (drag column borders)
+- [ ] PgBlade as a Zed extension (instead of fork, long-term)
